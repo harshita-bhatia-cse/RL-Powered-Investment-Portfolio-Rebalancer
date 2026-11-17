@@ -75,7 +75,9 @@ class BaseDataFetcher(ABC):
         """
         # Import here to avoid circular dependency
         from src.data.data_store import get_data_store
-        self.data_store = get_data_store(base_dir=cache_dir)
+        # The database is the canonical project data store; cache_dir is retained
+        # only for backward-compatible constructor calls.
+        self.data_store = get_data_store()
 
     def _standardize_fundamental_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """Standardize fundamental data format."""
@@ -1042,9 +1044,19 @@ class FMPFetcher(BaseDataFetcher, DataSource):
         existing_data = self.data_store.get_price_data(tickers['tickers'], start_date, end_date)
         logger.info(f"Found {len(existing_data)} existing price records in database")
 
-        # Offline: return existing data only
+        # With no FMP key, use Yahoo Finance for the explicitly requested historical data.
         if self.offline_mode:
-            logger.info("Offline mode: returning existing price data from database and skipping remote fetch")
+            missing_tickers = [
+                ticker for ticker in tickers["tickers"].astype(str).unique()
+                if ticker not in set(existing_data.get("tic", []))
+            ]
+            yahoo_data = self._fetch_yahoo_price_data(missing_tickers, start_date, end_date)
+            if not yahoo_data.empty:
+                self.data_store.save_price_data(yahoo_data)
+                return self.data_store.get_price_data(
+                    tickers["tickers"].astype(str).tolist(), start_date, end_date
+                )
+            logger.info("Yahoo Finance returned no rows; returning cached price data")
             return existing_data
 
         # Step 2: Identify tickers that need to be fetched
@@ -1094,6 +1106,7 @@ class FMPFetcher(BaseDataFetcher, DataSource):
 
         # Step 3: Fetch missing data from API
         all_data = []
+        failed_tickers = []
         if tickers_to_fetch:
             logger.info(f"Fetching price data for {len(tickers_to_fetch)} tickers from FMP")
             
@@ -1141,6 +1154,7 @@ class FMPFetcher(BaseDataFetcher, DataSource):
 
                 except Exception as e:
                     logger.warning(f"Failed to fetch price data for {ticker} ({min_date} to {max_date}): {e}")
+                    failed_tickers.append(ticker)
         else:
             logger.warning(f"No price data to fetch")
             return existing_data
@@ -1151,12 +1165,59 @@ class FMPFetcher(BaseDataFetcher, DataSource):
             df = self._standardize_price_data(df)
             rows_saved = self.data_store.save_price_data(df)
             logger.info(f"Saved {rows_saved} new price records to database")
+        if failed_tickers or not all_data:
+            logger.info("FMP did not provide all requested rows; trying Yahoo Finance fallback")
+            yahoo_data = self._fetch_yahoo_price_data(
+                list(dict.fromkeys(failed_tickers or list(tickers_to_fetch))), start_date, end_date
+            )
+            if not yahoo_data.empty:
+                self.data_store.save_price_data(yahoo_data)
 
         # Step 5: Return combined data from database
         final_data = self.data_store.get_price_data(tickers['tickers'].astype(str).tolist() if isinstance(tickers, pd.DataFrame) else list(tickers), start_date, end_date)
         logger.info(f"Returning {len(final_data)} total price records")
         
         return final_data
+
+    def _fetch_yahoo_price_data(
+        self, tickers: List[str], start_date: str, end_date: str
+    ) -> pd.DataFrame:
+        """Fetch and normalize Yahoo historical prices for the requested tickers."""
+        rows = []
+        for ticker in tickers:
+            try:
+                frame = yf.download(
+                    ticker,
+                    start=start_date,
+                    end=(pd.to_datetime(end_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+                    auto_adjust=False,
+                    progress=False,
+                    threads=False,
+                )
+                if frame.empty:
+                    continue
+                if isinstance(frame.columns, pd.MultiIndex):
+                    frame.columns = frame.columns.get_level_values(0)
+                for timestamp, values in frame.iterrows():
+                    close = values.get("Close")
+                    if pd.isna(close):
+                        continue
+                    rows.append({
+                        "gvkey": ticker,
+                        "datadate": pd.Timestamp(timestamp).strftime("%Y-%m-%d"),
+                        "tic": ticker,
+                        "prccd": values.get("Close"),
+                        "prcod": values.get("Open"),
+                        "prchd": values.get("High"),
+                        "prcld": values.get("Low"),
+                        "cshtrd": values.get("Volume"),
+                        "adj_close": values.get("Adj Close", close),
+                    })
+            except Exception as error:
+                logger.warning("Yahoo Finance fallback failed for %s: %s", ticker, error)
+        if not rows:
+            return pd.DataFrame()
+        return self._standardize_price_data(pd.DataFrame(rows))
 
 
 class DataSourceManager:

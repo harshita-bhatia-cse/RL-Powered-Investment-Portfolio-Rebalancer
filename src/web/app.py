@@ -17,14 +17,24 @@ from datetime import datetime, timedelta
 import logging
 from pathlib import Path
 import json
-from types import SimpleNamespace
 
 # Import project modules
 from src.config.settings import get_config
 from src.data.data_store import get_data_store
+from src.data.data_quality import calculate_price_quality
 from src.strategies.base_strategy import create_strategy, StrategyConfig
 from src.trading.alpaca_manager import create_alpaca_account_from_env
 from src.trading.trade_executor import TradeExecutor, ExecutionConfig
+from src.analytics import (
+    analyze_assets,
+    analyze_correlations,
+    allocation_summary,
+    calculate_portfolio_metrics,
+    calculate_risk_metrics,
+    compare_benchmarks,
+    prices_to_returns,
+    validate_weights,
+)
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -45,49 +55,6 @@ def _display_table(data: pd.DataFrame, **kwargs) -> None:
 def _format_currency(value) -> str:
     """Format numeric API values that may be returned as strings."""
     return f"${float(value or 0):,.2f}"
-
-
-def _run_synthetic_backtest(
-    price_data: pd.DataFrame,
-    weight_signals: pd.DataFrame,
-    initial_capital: float,
-    strategy_name: str,
-):
-    """Run the dashboard demo without native backtesting dependencies."""
-    prices = price_data.pivot(
-        index="datadate", columns="tic", values="adj_close"
-    ).sort_index()
-    returns = prices.pct_change().fillna(0.0)
-    weights = (
-        weight_signals.reindex(prices.index)
-        .ffill()
-        .fillna(0.0)
-        .reindex(columns=prices.columns, fill_value=0.0)
-    )
-    weight_totals = weights.sum(axis=1).replace(0.0, np.nan)
-    weights = weights.div(weight_totals, axis=0).fillna(0.0)
-    portfolio_returns = (returns * weights).sum(axis=1)
-    portfolio_values = initial_capital * (1.0 + portfolio_returns).cumprod()
-    years = max((prices.index[-1] - prices.index[0]).days / 365.25, 1 / 365.25)
-    annual_return = (portfolio_values.iloc[-1] / initial_capital) ** (1 / years) - 1
-    annual_volatility = portfolio_returns.std() * np.sqrt(252)
-    drawdown = portfolio_values / portfolio_values.cummax() - 1
-    metrics = {
-        "total_return": portfolio_values.iloc[-1] / initial_capital - 1,
-        "annual_return": annual_return,
-        "annual_volatility": annual_volatility,
-        "max_drawdown": drawdown.min(),
-        "sharpe_ratio": (
-            portfolio_returns.mean() * 252 / annual_volatility
-            if annual_volatility > 0 else 0.0
-        ),
-    }
-    return SimpleNamespace(
-        strategy_name=strategy_name,
-        portfolio_returns=portfolio_returns,
-        portfolio_values=portfolio_values,
-        metrics=metrics,
-    )
 
 
 # Configure page
@@ -301,6 +268,23 @@ def show_data_management():
                     except Exception as e:
                         st.error(f"Failed to fetch data: {e}")
 
+            if st.button("Download Sample Historical Prices"):
+                with st.spinner("Downloading SPY, QQQ, GLD, TLT and BND prices..."):
+                    try:
+                        from src.data.data_fetcher import fetch_price_data
+                        sample_tickers = ["SPY", "QQQ", "GLD", "TLT", "BND"]
+                        end = datetime.now().date()
+                        start = end - timedelta(days=365 * 5)
+                        prices = fetch_price_data(
+                            sample_tickers, start.isoformat(), end.isoformat(), preferred_source="FMP"
+                        )
+                        if prices.empty:
+                            st.warning("No historical data was returned by FMP or Yahoo Finance.")
+                        else:
+                            st.success(f"Stored {len(prices)} historical price records.")
+                    except Exception as error:
+                        st.error(f"Historical download failed: {error}")
+
         with col2:
             st.subheader("Local Data")
             uploaded_file = st.file_uploader("Upload CSV file", type=['csv'])
@@ -358,18 +342,29 @@ def show_data_management():
 
     with tab4:
         st.subheader("Data Quality")
-
-        # Data quality checks
-        st.subheader("Data Quality Metrics")
-
-        # Sample quality metrics
-        quality_data = pd.DataFrame({
-            'Metric': ['Completeness', 'Accuracy', 'Consistency', 'Timeliness'],
-            'Score': [95.2, 98.1, 92.3, 99.8],
-            'Status': ['Good', 'Excellent', 'Good', 'Excellent']
-        })
-
-        _display_table(quality_data, use_container_width=True)
+        quality_source = st.session_state.data_store.get_price_data(
+            ["SPY", "QQQ", "GLD", "TLT", "BND"], "1900-01-01", datetime.now().date().isoformat()
+        )
+        if quality_source.empty:
+            st.info("No historical price data is available. Download or import data before calculating quality scores.")
+        else:
+            quality = calculate_price_quality(quality_source.rename(columns={
+                "tic": "ticker",
+                "datadate": "date",
+                "prcod": "open",
+                "prchd": "high",
+                "prcld": "low",
+                "prccd": "close",
+                "cshtrd": "volume",
+            }))
+            quality_data = pd.DataFrame({
+                "Metric": ["Completeness", "Accuracy", "Consistency", "Timeliness"],
+                "Score": [quality["completeness"], quality["accuracy"], quality["consistency"], quality["timeliness"]],
+            })
+            _display_table(quality_data, use_container_width=True)
+            st.caption(
+                f"Based on {quality['record_count']} stored rows; latest date: {quality['latest_date']}."
+            )
 
 
 def show_strategy_backtesting():
@@ -446,26 +441,20 @@ def show_strategy_backtesting():
 
 
 def run_backtest(strategy_type, start_date, end_date, initial_capital, top_quantile):
-    """Run backtest with given parameters."""
-    # Load sample data (in practice, load real data)
-    dates = pd.date_range(start_date, end_date, freq='d')
-    price_data = pd.DataFrame({
-        'datadate': np.tile(dates, 3),
-        'tic': np.repeat(['AAPL', 'MSFT', 'GOOGL'], len(dates)),
-        'adj_close': np.concatenate([
-            100 + np.cumsum(np.random.normal(0, 0.02, len(dates))),
-            100 + np.cumsum(np.random.normal(0, 0.02, len(dates))),
-            100 + np.cumsum(np.random.normal(0, 0.02, len(dates))),
-        ]),
-    })
+    """Run a backtest using stored or downloaded historical prices."""
+    from src.data.data_fetcher import fetch_price_data
+    tickers = ["SPY", "QQQ", "GLD", "TLT", "BND"]
+    price_data = fetch_price_data(
+        tickers, start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
+    )
+    if price_data.empty:
+        raise ValueError("No historical price data is available for this backtest.")
 
     # Sample weight signals
-    weight_signals = pd.DataFrame({
-        'date': pd.date_range(start_date, end_date, freq='QE'),
-        'AAPL': 0.5,
-        'MSFT': 0.3,
-        'GOOGL': 0.2
-    }).set_index('date')
+    weight_signals = pd.DataFrame(
+        {ticker: 1.0 / len(tickers) for ticker in tickers},
+        index=pd.date_range(start_date, end_date, freq="QE"),
+    )
 
     # Run backtest
     strategy_name = f"{strategy_type} Backtest"
@@ -484,19 +473,12 @@ def run_backtest(strategy_type, start_date, end_date, initial_capital, top_quant
             weight_signals=weight_signals,
         )
     except ImportError as error:
-        logger.warning("Native backtest engine unavailable; using synthetic demo: %s", error)
-        result = _run_synthetic_backtest(
-            price_data,
-            weight_signals,
-            initial_capital,
-            strategy_name,
-        )
+        raise RuntimeError("The native backtest engine is unavailable; synthetic results are disabled.") from error
 
     # Store result
     st.session_state.backtest_result = result
 
-    st.success("Synthetic demo backtest completed successfully." if result.__class__ is SimpleNamespace
-               else "Backtest completed successfully!")
+    st.success("Backtest completed successfully!")
 
 
 def show_live_trading():
@@ -619,95 +601,93 @@ def show_live_trading():
 
 
 def show_portfolio_analysis():
-    """Show portfolio analysis interface."""
+    """Show historical-data portfolio performance and risk analytics."""
     st.header("Portfolio Analysis")
+    with st.expander("Portfolio inputs", expanded=True):
+        ticker_text = st.text_input("Assets (comma-separated)", "SPY, QQQ")
+        ticker_list = [ticker.strip().upper() for ticker in ticker_text.split(",") if ticker.strip()]
+        default_weight = 1.0 / len(ticker_list) if ticker_list else 0.0
+        weight_text = st.text_input(
+            "Weights (comma-separated, percentages)",
+            ", ".join(f"{default_weight * 100:.2f}" for _ in ticker_list),
+        )
+        start_date = st.date_input("Start date", datetime.now().date() - timedelta(days=365))
+        end_date = st.date_input("End date", datetime.now().date())
+        initial_investment = st.number_input("Initial investment", min_value=1.0, value=100000.0)
 
-    # Sample portfolio data
-    dates = pd.date_range('2024-01-01', periods=100, freq='d')
-    portfolio_values = 1000000 + np.cumsum(np.random.normal(2000, 8000, 100))
+    try:
+        weights = validate_weights({
+            ticker: float(weight.strip()) / 100.0
+            for ticker, weight in zip(ticker_list, weight_text.split(","))
+        })
+        data = st.session_state.data_store.get_price_data(
+            ticker_list, start_date.isoformat(), end_date.isoformat()
+        )
+        if data.empty:
+            st.info("No historical data is stored for these assets and dates. Load market data in Data Management first.")
+            return
+        prices = data.assign(datadate=pd.to_datetime(data["datadate"])).pivot(
+            index="datadate", columns="tic", values="adj_close"
+        ).sort_index()
+        returns = prices_to_returns(prices).dropna()
+        if len(returns) < 2:
+            st.warning("At least two valid historical observations are required.")
+            return
+        performance = calculate_portfolio_metrics(returns, weights, initial_investment)
+        risk = calculate_risk_metrics(performance["daily_returns"])
+        assets = analyze_assets(returns, weights)
+        correlations = analyze_correlations(returns) if len(returns.columns) > 1 else None
+    except (ValueError, KeyError) as error:
+        st.error(f"Unable to calculate analytics: {error}")
+        return
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Performance", "Risk Analysis", "Attribution", "Benchmarking"])
-
-    with tab1:
-        st.subheader("Performance Analysis")
-
-        # Performance chart
-        fig = px.line(x=dates, y=portfolio_values, title="Portfolio Performance")
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Performance metrics
-        returns = pd.Series(portfolio_values).pct_change().dropna()
-        total_return = (portfolio_values[-1] / portfolio_values[0]) - 1
-        annual_return = returns.mean() * 252
-        volatility = returns.std() * np.sqrt(252)
-        sharpe = annual_return / volatility if volatility > 0 else 0
-
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Total Return", f"{total_return:.2%}")
-        with col2:
-            st.metric("Annual Return", f"{annual_return:.2%}")
-        with col3:
-            st.metric("Volatility", f"{volatility:.2%}")
-        with col4:
-            st.metric("Sharpe Ratio", f"{sharpe:.2f}")
-
-    with tab2:
+    tabs = st.tabs(["Portfolio Overview", "Risk Analysis", "Asset Performance", "Correlation", "Allocation", "Benchmark"])
+    with tabs[0]:
+        st.subheader("Portfolio Overview")
+        values = performance["portfolio_values"].rename("Portfolio value")
+        st.plotly_chart(px.line(values, title="Historical portfolio value"), use_container_width=True)
+        columns = st.columns(4)
+        columns[0].metric("Initial investment", _format_currency(performance["initial_investment"]))
+        columns[1].metric("Current value", _format_currency(performance["current_value"]))
+        columns[2].metric("Total return", f"{performance['total_return']:.2%}")
+        columns[3].metric("Annualized return", f"{performance['annualized_return']:.2%}")
+    with tabs[1]:
         st.subheader("Risk Analysis")
-
-        # Drawdown analysis
-        cumulative = (1 + returns).cumprod()
-        running_max = cumulative.expanding().max()
-        drawdown = (cumulative - running_max) / running_max
-
-        fig = px.line(x=dates[1:], y=drawdown, title="Portfolio Drawdown")
-        fig.update_layout(yaxis_title="Drawdown", yaxis_tickformat=".2%")
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Risk metrics
-        max_drawdown = drawdown.min()
-        var_95 = np.percentile(returns, 5)
-        cvar_95 = returns[returns <= var_95].mean()
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Max Drawdown", f"{max_drawdown:.2%}")
-        with col2:
-            st.metric("VaR (95%)", f"{var_95:.2%}")
-        with col3:
-            st.metric("CVaR (95%)", f"{cvar_95:.2%}")
-
-    with tab3:
-        st.subheader("Attribution Analysis")
-
-        # Sample attribution data
-        attribution_data = pd.DataFrame({
-            'Asset': ['AAPL', 'MSFT', 'GOOGL', 'Bonds', 'Cash'],
-            'Weight': [0.3, 0.25, 0.2, 0.15, 0.1],
-            'Return': [0.15, 0.12, 0.18, 0.03, 0.02],
-            'Contribution': [0.045, 0.03, 0.036, 0.0045, 0.002]
-        })
-
-        fig = px.bar(attribution_data, x='Asset', y='Contribution',
-                    title="Return Attribution by Asset")
-        st.plotly_chart(fig, use_container_width=True)
-
-        _display_table(attribution_data, use_container_width=True)
-
-    with tab4:
-        st.subheader("Benchmarking")
-
-        # Sample benchmark comparison
-        benchmark_data = pd.DataFrame({
-            'Date': dates,
-            'Portfolio': portfolio_values,
-            'SPY': 1000000 + np.cumsum(np.random.normal(1500, 6000, 100)),
-            'QQQ': 1000000 + np.cumsum(np.random.normal(1800, 7000, 100))
-        })
-
-        fig = px.line(benchmark_data, x='Date', y=['Portfolio', 'SPY', 'QQQ'],
-                     title="Portfolio vs Benchmarks")
-        st.plotly_chart(fig, use_container_width=True)
+        columns = st.columns(5)
+        columns[0].metric("Volatility", f"{risk['annualized_volatility']:.2%}")
+        columns[1].metric("Sharpe", f"{risk['sharpe_ratio']:.2f}")
+        columns[2].metric("Sortino", f"{risk['sortino_ratio']:.2f}")
+        columns[3].metric("Max drawdown", f"{risk['maximum_drawdown']:.2%}")
+        columns[4].metric("CVaR (95%)", f"{risk['cvar']:.2%}")
+        drawdown = (1 + performance["daily_returns"]).cumprod()
+        drawdown = drawdown / drawdown.cummax() - 1
+        st.plotly_chart(px.line(drawdown, title="Historical drawdown"), use_container_width=True)
+    with tabs[2]:
+        st.subheader("Asset Performance")
+        _display_table(assets["assets"].reset_index(), use_container_width=True)
+        st.info(f"Best performer: {assets['best_performing_asset']} | Worst performer: {assets['worst_performing_asset']}")
+    with tabs[3]:
+        st.subheader("Correlation Analysis")
+        if correlations is None:
+            st.info("Add at least two assets for correlation analysis.")
+        else:
+            st.plotly_chart(px.imshow(correlations["matrix"], text_auto=".2f", title="Asset return correlation"), use_container_width=True)
+            _display_table(pd.DataFrame(correlations["highly_correlated_pairs"]), use_container_width=True)
+    with tabs[4]:
+        st.subheader("Portfolio Allocation")
+        allocation = allocation_summary(weights)
+        _display_table(allocation["allocation"].reset_index(), use_container_width=True)
+        st.metric("Concentration (Herfindahl index)", f"{allocation['herfindahl_index']:.3f}")
+    with tabs[5]:
+        st.subheader("Benchmark Comparison")
+        if "SPY" not in returns.columns:
+            st.info("SPY benchmark data is not available for this date range.")
+        else:
+            comparison = compare_benchmarks(
+                performance["daily_returns"],
+                {"SPY buy-and-hold": returns["SPY"]},
+            )
+            _display_table(comparison.reset_index(), use_container_width=True)
 
 
 def show_settings():

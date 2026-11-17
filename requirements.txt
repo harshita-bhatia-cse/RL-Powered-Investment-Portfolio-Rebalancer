@@ -36,6 +36,8 @@ bt>=1.2.0
 # Configuration and validation
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
+fastapi>=0.115.0
+uvicorn>=0.30.0
 
 # Database and storage
 sqlalchemy>=2.0.0

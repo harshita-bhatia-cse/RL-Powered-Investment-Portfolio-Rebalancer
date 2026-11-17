@@ -12,6 +12,7 @@ from .portfolio_env import (
     project_to_simplex,
 )
 from .synthetic_portfolio_env import SyntheticPortfolioEnv
+from .historical_portfolio_env import HistoricalPortfolioEnv, RewardConfig
 
 __all__ = [
     "ASSET_UNIVERSE",
@@ -24,4 +25,6 @@ __all__ = [
     "load_market_data",
     "project_to_simplex",
     "SyntheticPortfolioEnv",
+    "HistoricalPortfolioEnv",
+    "RewardConfig",
 ]

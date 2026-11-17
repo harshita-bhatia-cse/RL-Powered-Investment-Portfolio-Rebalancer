@@ -75,6 +75,10 @@ setup(
             "plotly>=5.15.0",
             "seaborn>=0.12.0",
         ],
+        "api": [
+            "fastapi>=0.115.0",
+            "uvicorn>=0.30.0",
+        ],
         "ml": [
             "torch>=2.0.0",
             "gymnasium>=0.29.0",
@@ -95,6 +99,8 @@ setup(
             "psycopg2-binary>=2.9.0",
             "sphinx>=7.2.0",
             "sphinx-rtd-theme>=1.3.0",
+            "fastapi>=0.115.0",
+            "uvicorn>=0.30.0",
         ],
     },
     entry_points={
