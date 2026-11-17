@@ -17,17 +17,78 @@ from datetime import datetime, timedelta
 import logging
 from pathlib import Path
 import json
+from types import SimpleNamespace
 
 # Import project modules
 from src.config.settings import get_config
 from src.data.data_store import get_data_store
 from src.strategies.base_strategy import create_strategy, StrategyConfig
-from src.backtest.backtest_engine import BacktestEngine, BacktestConfig
 from src.trading.alpaca_manager import create_alpaca_account_from_env
 from src.trading.trade_executor import TradeExecutor, ExecutionConfig
 
 # Setup logging
 logger = logging.getLogger(__name__)
+
+
+def _display_table(data: pd.DataFrame, **kwargs) -> None:
+    """Render a table, with a text fallback when Streamlit's Arrow backend is unavailable."""
+    if "use_container_width" in kwargs:
+        kwargs["width"] = "stretch" if kwargs.pop("use_container_width") else "content"
+    try:
+        st.dataframe(data, **kwargs)
+    except ImportError as error:
+        logger.warning("Streamlit dataframe rendering is unavailable: %s", error)
+        st.warning("Interactive table rendering is unavailable on this machine.")
+        st.code(data.to_string(index=False))
+
+
+def _format_currency(value) -> str:
+    """Format numeric API values that may be returned as strings."""
+    return f"${float(value or 0):,.2f}"
+
+
+def _run_synthetic_backtest(
+    price_data: pd.DataFrame,
+    weight_signals: pd.DataFrame,
+    initial_capital: float,
+    strategy_name: str,
+):
+    """Run the dashboard demo without native backtesting dependencies."""
+    prices = price_data.pivot(
+        index="datadate", columns="tic", values="adj_close"
+    ).sort_index()
+    returns = prices.pct_change().fillna(0.0)
+    weights = (
+        weight_signals.reindex(prices.index)
+        .ffill()
+        .fillna(0.0)
+        .reindex(columns=prices.columns, fill_value=0.0)
+    )
+    weight_totals = weights.sum(axis=1).replace(0.0, np.nan)
+    weights = weights.div(weight_totals, axis=0).fillna(0.0)
+    portfolio_returns = (returns * weights).sum(axis=1)
+    portfolio_values = initial_capital * (1.0 + portfolio_returns).cumprod()
+    years = max((prices.index[-1] - prices.index[0]).days / 365.25, 1 / 365.25)
+    annual_return = (portfolio_values.iloc[-1] / initial_capital) ** (1 / years) - 1
+    annual_volatility = portfolio_returns.std() * np.sqrt(252)
+    drawdown = portfolio_values / portfolio_values.cummax() - 1
+    metrics = {
+        "total_return": portfolio_values.iloc[-1] / initial_capital - 1,
+        "annual_return": annual_return,
+        "annual_volatility": annual_volatility,
+        "max_drawdown": drawdown.min(),
+        "sharpe_ratio": (
+            portfolio_returns.mean() * 252 / annual_volatility
+            if annual_volatility > 0 else 0.0
+        ),
+    }
+    return SimpleNamespace(
+        strategy_name=strategy_name,
+        portfolio_returns=portfolio_returns,
+        portfolio_values=portfolio_values,
+        metrics=metrics,
+    )
+
 
 # Configure page
 st.set_page_config(
@@ -246,7 +307,7 @@ def show_data_management():
             if uploaded_file is not None:
                 df = pd.read_csv(uploaded_file)
                 st.write(f"Uploaded {len(df)} rows")
-                st.dataframe(df.head())
+                _display_table(df.head())
 
     with tab2:
         st.subheader("Data Processing")
@@ -308,7 +369,7 @@ def show_data_management():
             'Status': ['Good', 'Excellent', 'Good', 'Excellent']
         })
 
-        st.dataframe(quality_data, use_container_width=True)
+        _display_table(quality_data, use_container_width=True)
 
 
 def show_strategy_backtesting():
@@ -358,13 +419,13 @@ def show_strategy_backtesting():
             # Key metrics
             metrics_cols = st.columns(4)
             with metrics_cols[0]:
-                st.metric("Final Value", ".2f")
+                st.metric("Final Value", f"${result.portfolio_values.iloc[-1]:,.2f}")
             with metrics_cols[1]:
-                st.metric("Total Return", ".2%")
+                st.metric("Total Return", f"{result.metrics.get('total_return', 0.0):.2%}")
             with metrics_cols[2]:
-                st.metric("Annual Return", ".2%")
+                st.metric("Annual Return", f"{result.metrics.get('annual_return', 0.0):.2%}")
             with metrics_cols[3]:
-                st.metric("Sharpe Ratio", ".2f")
+                st.metric("Sharpe Ratio", f"{result.metrics.get('sharpe_ratio', 0.0):.2f}")
 
             # Performance chart
             if hasattr(result, 'portfolio_values'):
@@ -379,29 +440,23 @@ def show_strategy_backtesting():
             st.subheader("Detailed Metrics")
             metrics_df = pd.DataFrame({
                 'Metric': list(result.metrics.keys()),
-                'Value': [".4f" for v in result.metrics.values()]
+                'Value': [f"{value:.4f}" for value in result.metrics.values()]
             })
-            st.dataframe(metrics_df)
+            _display_table(metrics_df)
 
 
 def run_backtest(strategy_type, start_date, end_date, initial_capital, top_quantile):
     """Run backtest with given parameters."""
-    # Create strategy
-    config = StrategyConfig(name=f"{strategy_type} Backtest")
-    strategy = create_strategy(strategy_type, config)
-
-    # Create backtest configuration
-    backtest_config = BacktestConfig(
-        start_date=start_date.strftime("%Y-%m-%d"),
-        end_date=end_date.strftime("%Y-%m-%d"),
-        initial_capital=initial_capital
-    )
-
     # Load sample data (in practice, load real data)
     dates = pd.date_range(start_date, end_date, freq='d')
     price_data = pd.DataFrame({
-        'datadate': dates,
-        'adj_close': 100 + np.cumsum(np.random.normal(0, 0.02, len(dates)))
+        'datadate': np.tile(dates, 3),
+        'tic': np.repeat(['AAPL', 'MSFT', 'GOOGL'], len(dates)),
+        'adj_close': np.concatenate([
+            100 + np.cumsum(np.random.normal(0, 0.02, len(dates))),
+            100 + np.cumsum(np.random.normal(0, 0.02, len(dates))),
+            100 + np.cumsum(np.random.normal(0, 0.02, len(dates))),
+        ]),
     })
 
     # Sample weight signals
@@ -410,16 +465,38 @@ def run_backtest(strategy_type, start_date, end_date, initial_capital, top_quant
         'AAPL': 0.5,
         'MSFT': 0.3,
         'GOOGL': 0.2
-    })
+    }).set_index('date')
 
     # Run backtest
-    engine = BacktestEngine(backtest_config)
-    result = engine.run_backtest(strategy, price_data, weight_signals)
+    strategy_name = f"{strategy_type} Backtest"
+    try:
+        from src.backtest.backtest_engine import BacktestEngine, BacktestConfig
+
+        backtest_config = BacktestConfig(
+            start_date=start_date.strftime("%Y-%m-%d"),
+            end_date=end_date.strftime("%Y-%m-%d"),
+            initial_capital=initial_capital
+        )
+        engine = BacktestEngine(backtest_config)
+        result = engine.run_backtest(
+            strategy_name=strategy_name,
+            price_data=price_data,
+            weight_signals=weight_signals,
+        )
+    except ImportError as error:
+        logger.warning("Native backtest engine unavailable; using synthetic demo: %s", error)
+        result = _run_synthetic_backtest(
+            price_data,
+            weight_signals,
+            initial_capital,
+            strategy_name,
+        )
 
     # Store result
     st.session_state.backtest_result = result
 
-    st.success("Backtest completed successfully!")
+    st.success("Synthetic demo backtest completed successfully." if result.__class__ is SimpleNamespace
+               else "Backtest completed successfully!")
 
 
 def show_live_trading():
@@ -448,16 +525,21 @@ def show_live_trading():
 
                         col1, col2, col3 = st.columns(3)
                         with col1:
-                            st.metric("Portfolio Value", ".2f")
+                            st.metric("Portfolio Value", _format_currency(account_info.get("portfolio_value")))
                         with col2:
-                            st.metric("Cash", ".2f")
+                            st.metric("Cash", _format_currency(account_info.get("cash")))
                         with col3:
-                            st.metric("Buying Power", ".2f")
+                            st.metric("Buying Power", _format_currency(account_info.get("buying_power")))
 
                         # Positions table
                         if positions:
                             positions_df = pd.DataFrame(positions)
-                            st.dataframe(positions_df[['symbol', 'qty', 'avg_entry_price', 'market_value', 'unrealized_pl']], use_container_width=True)
+                            _display_table(
+                                positions_df[
+                                    ['symbol', 'qty', 'avg_entry_price', 'market_value', 'unrealized_pl']
+                                ],
+                                use_container_width=True,
+                            )
                         else:
                             st.info("No open positions")
 
@@ -610,7 +692,7 @@ def show_portfolio_analysis():
                     title="Return Attribution by Asset")
         st.plotly_chart(fig, use_container_width=True)
 
-        st.dataframe(attribution_data, use_container_width=True)
+        _display_table(attribution_data, use_container_width=True)
 
     with tab4:
         st.subheader("Benchmarking")

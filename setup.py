@@ -10,12 +10,12 @@ from pathlib import Path
 
 # Read README
 this_directory = Path(__file__).parent
-long_description = (this_directory / "README.md").read_text()
+long_description = (this_directory / "README.md").read_text(encoding="utf-8")
 
 # Read core requirements
 def read_requirements():
     requirements = []
-    with open("requirements.txt", "r") as f:
+    with open(this_directory / "requirements.txt", "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line and not line.startswith("#") and not line.startswith("tensorflow") and not line.startswith("torch"):

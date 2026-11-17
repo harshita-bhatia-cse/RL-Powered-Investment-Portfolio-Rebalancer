@@ -11,11 +11,13 @@ import logging
 import sys
 from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent))
-
-from config.settings import get_config
-from utils.logging_utils import setup_logging
+if __package__:
+    from .config.settings import get_config
+    from .utils.logging_utils import setup_logging
+else:
+    sys.path.insert(0, str(Path(__file__).parent))
+    from config.settings import get_config
+    from utils.logging_utils import setup_logging
 
 
 def setup_parser():
