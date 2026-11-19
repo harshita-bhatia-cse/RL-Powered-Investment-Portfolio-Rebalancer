@@ -1044,18 +1044,59 @@ class FMPFetcher(BaseDataFetcher, DataSource):
         existing_data = self.data_store.get_price_data(tickers['tickers'], start_date, end_date)
         logger.info(f"Found {len(existing_data)} existing price records in database")
 
-        # With no FMP key, use Yahoo Finance for the explicitly requested historical data.
+        # With no FMP key, use Yahoo Finance for missing historical dates.
         if self.offline_mode:
+            requested_tickers = tickers["tickers"].astype(str).unique().tolist()
+
+            try:
+                bulk_missing = self.data_store.get_missing_price_dates_bulk(
+                    tickers, start_date, end_date, exchange="NYSE"
+                )
+            except Exception as error:
+                logger.warning(
+                    f"Bulk missing-date check failed; using per-ticker fallback: {error}"
+                )
+                bulk_missing = None
+
+            # Fallback if the bulk date checker is unavailable.
+            if not isinstance(bulk_missing, dict):
+                bulk_missing = {}
+
+                for ticker in requested_tickers:
+                    try:
+                        missing_ranges = self.data_store.get_missing_price_dates(
+                            ticker, start_date, end_date, exchange="NYSE"
+                        )
+                        bulk_missing[ticker] = missing_ranges or []
+                    except Exception as error:
+                        logger.warning(
+                            f"Could not check missing dates for {ticker}: {error}"
+                        )
+                        bulk_missing[ticker] = [(start_date, end_date)]
+
             missing_tickers = [
-                ticker for ticker in tickers["tickers"].astype(str).unique()
-                if ticker not in set(existing_data.get("tic", []))
+                ticker for ticker in requested_tickers
+                if bulk_missing.get(ticker, [(start_date, end_date)])
             ]
-            yahoo_data = self._fetch_yahoo_price_data(missing_tickers, start_date, end_date)
+
+            if not missing_tickers:
+                logger.info("All requested tickers have complete cached date coverage")
+                return existing_data
+
+            logger.info(
+                f"Fetching missing historical data for {len(missing_tickers)} tickers"
+            )
+
+            yahoo_data = self._fetch_yahoo_price_data(
+                missing_tickers, start_date, end_date
+            )
+
             if not yahoo_data.empty:
                 self.data_store.save_price_data(yahoo_data)
                 return self.data_store.get_price_data(
-                    tickers["tickers"].astype(str).tolist(), start_date, end_date
+                    requested_tickers, start_date, end_date
                 )
+
             logger.info("Yahoo Finance returned no rows; returning cached price data")
             return existing_data
 
