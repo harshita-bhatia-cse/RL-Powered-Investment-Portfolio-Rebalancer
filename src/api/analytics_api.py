@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 from typing import Dict, List
 
+import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
 from src.analytics import (
@@ -21,6 +25,14 @@ from src.analytics import (
 from src.data.data_store import get_data_store
 
 app = FastAPI(title="Portfolio Analytics API", version="1.0.0")
+
+_STATIC_DIR = Path(__file__).resolve().parents[1] / "web" / "static"
+
+
+@app.get("/api/status", tags=["system"])
+def status():
+    """Return a small, dependency-free health response for the web dashboard."""
+    return {"status": "ok", "mode": "research", "trading": "paper-only"}
 
 
 class AnalyticsRequest(BaseModel):
@@ -120,3 +132,51 @@ def portfolio_benchmarks(request: AnalyticsRequest):
     if not benchmarks:
         raise HTTPException(status_code=404, detail="No requested benchmark data is available")
     return _jsonable(compare_benchmarks(portfolio["daily_returns"], benchmarks))
+
+
+@app.get("/api/dashboard/stats", tags=["dashboard"])
+def dashboard_stats():
+    """Return the existing local data-store statistics for the sidebar."""
+    return get_data_store().get_storage_stats()
+
+
+@app.get("/api/synthetic/preview", tags=["synthetic"])
+def synthetic_preview(
+    seed: int = Query(default=42, ge=0, le=2_147_483_647),
+    sessions: int = Query(default=252, ge=20, le=2_520),
+):
+    """Generate an in-memory, reproducible synthetic market summary.
+
+    This does not train a model, save files, call a market-data provider, or
+    place orders. It lets the plain-JavaScript dashboard use the project's real
+    synthetic generator before a user explicitly starts an offline experiment.
+    """
+    from src.rl.synthetic_data import SyntheticMarketConfig, generate_synthetic_market
+
+    dataset = generate_synthetic_market(SyntheticMarketConfig(sessions=sessions), seed=seed)
+    regime_counts = {
+        name: dataset.regime_labels.count(name)
+        for name in ("bull", "bear", "sideways")
+    }
+    final_growth = np.cumprod(1.0 + dataset.benchmark_returns)[-1]
+    return {
+        "seed": dataset.seed,
+        "sessions": sessions,
+        "scenario_id": dataset.metadata["scenario_id"],
+        "assets": list(dataset.asset_names),
+        "regime_counts": regime_counts,
+        "vix_start": round(float(dataset.vix_levels[0]), 2),
+        "vix_end": round(float(dataset.vix_levels[-1]), 2),
+        "benchmark_growth": round(float(final_growth), 4),
+        "sample_vix": [round(float(value), 2) for value in dataset.vix_levels[:20]],
+    }
+
+
+# Mount the dashboard last: API routes above retain priority over static files.
+app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+
+
+@app.get("/", include_in_schema=False)
+def dashboard():
+    """Serve the dependency-free research dashboard."""
+    return FileResponse(_STATIC_DIR / "index.html")

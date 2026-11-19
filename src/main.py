@@ -27,7 +27,7 @@ def setup_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python src/main.py dashboard    # Start web dashboard
+  python src/main.py dashboard    # Start the HTML/CSS/JavaScript dashboard
   python src/main.py backtest     # Run backtest
   python src/main.py trade        # Execute live trading
   python src/main.py data         # Manage data
@@ -73,8 +73,19 @@ def main():
 
     try:
         if args.command == 'dashboard':
-            from web.app import main as dashboard_main
-            dashboard_main()
+            import uvicorn
+            if __package__:
+                from .web.server import app
+            else:
+                from web.server import app
+
+            logger.info("Starting dashboard at http://%s:%s", config.web.host, config.web.port)
+            uvicorn.run(
+                app,
+                host=config.web.host,
+                port=config.web.port,
+                reload=config.web.debug,
+            )
 
         elif args.command == 'backtest':
             from backtest.backtest_engine import main as backtest_main

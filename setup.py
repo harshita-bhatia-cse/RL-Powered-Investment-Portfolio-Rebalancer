@@ -71,13 +71,10 @@ setup(
             "myst-parser>=2.0.0",
         ],
         "web": [
-            "streamlit>=1.28.0",
-            "plotly>=5.15.0",
-            "seaborn>=0.12.0",
-        ],
-        "api": [
             "fastapi>=0.115.0",
             "uvicorn>=0.30.0",
+        ],
+        "api": [
         ],
         "ml": [
             "torch>=2.0.0",
