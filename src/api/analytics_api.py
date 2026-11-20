@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import json
+import logging
 import os
 
 from datetime import date
@@ -23,6 +24,18 @@ from src.analytics import (
     compare_benchmarks,
     prices_to_returns,
     validate_weights,
+)
+from src.api.backtest_schemas import (
+    HistoricalBacktestHealthResponse,
+    HistoricalBacktestRequest,
+    HistoricalBacktestResponse,
+    HistoricalComparisonRequest,
+    HistoricalComparisonResponse,
+)
+from src.backtest.historical_service import (
+    HistoricalBacktestService,
+    HistoricalDataUnavailableError,
+    UnsupportedStrategyError,
 )
 from src.data.data_store import get_data_store
 
@@ -140,6 +153,75 @@ def portfolio_benchmarks(request: AnalyticsRequest):
 def dashboard_stats():
     """Return the existing local data-store statistics for the sidebar."""
     return get_data_store().get_storage_stats()
+
+
+@app.post(
+    "/api/backtest/historical",
+    response_model=HistoricalBacktestResponse,
+    tags=["backtest"],
+)
+def historical_backtest(
+    request: HistoricalBacktestRequest,
+) -> HistoricalBacktestResponse:
+    """Run a broker-independent strategy simulation on historical CSV data."""
+    service = HistoricalBacktestService()
+    try:
+        return service.run(
+            strategy_name=request.strategy,
+            partition=request.partition,
+            initial_capital=request.initial_capital,
+            parameters=request.parameters,
+        )
+    except UnsupportedStrategyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except HistoricalDataUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post(
+    "/api/backtest/compare",
+    response_model=HistoricalComparisonResponse,
+    tags=["backtest"],
+)
+def compare_historical_backtests(
+    request: HistoricalComparisonRequest,
+) -> HistoricalComparisonResponse:
+    """Compare supported strategies using identical historical inputs."""
+    service = HistoricalBacktestService()
+    try:
+        return service.compare(
+            strategy_names=request.strategies,
+            partition=request.partition,
+            initial_capital=request.initial_capital,
+            parameters=request.parameters,
+        )
+    except UnsupportedStrategyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except HistoricalDataUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get(
+    "/api/backtest/health",
+    response_model=HistoricalBacktestHealthResponse,
+    tags=["backtest"],
+)
+def historical_backtest_health() -> HistoricalBacktestHealthResponse:
+    """Report dataset validation and historical-backtest availability."""
+    try:
+        return HistoricalBacktestService().health()
+    except Exception as exc:
+        logging.getLogger(__name__).exception(
+            "Historical backtest health check failed"
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Historical backtest health check failed",
+        ) from exc
 
 
 @app.get("/api/synthetic/preview", tags=["synthetic"])

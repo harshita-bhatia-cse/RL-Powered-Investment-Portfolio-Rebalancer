@@ -293,6 +293,36 @@ alpaca = AlpacaManager([create_alpaca_account_from_env()])
 alpaca.execute_portfolio_rebalance(target_weights={'AAPL': 0.3, 'MSFT': 0.7})
 ```
 
+### Historical CSV backtesting API
+
+The read-only FastAPI app also exposes a separate historical research path
+that loads `data/historical_market_csv/` through `load_market_data` and the
+CSV-backed `PortfolioTradingEnv`. It does not use SQLite, fetch market data,
+load the synthetic PPO model, or submit trades.
+
+Supported strategies are `equal_weight` (rebalanced to equal ETF-and-cash
+weights each session) and `buy_and_hold` (equal initial target followed by
+no-trade transitions). Requests select the environment's fixed `train`,
+`validation`, or `test` partition; validation and test reuse the scaler fitted
+on the 2018–2021 training interval. Endpoints are:
+
+- `POST /api/backtest/historical`
+- `POST /api/backtest/compare`
+- `GET /api/backtest/health`
+
+Minimum variance is not exposed: a fixed-universe implementation using only
+training-period covariance estimates and the environment's allocation
+constraints has not been validated.
+
+The response includes realized NAV, daily returns, environment-reported
+turnover and transaction costs, and performance/risk metrics. Annualized
+volatility and Sharpe/Sortino ratios use 252 sessions per year; CAGR uses
+elapsed calendar days with 365.25 days per year. Historical corporate-action
+coverage is unverified by default, so results must not be described as
+corporate-action-complete or total-return accurate. The existing allocation
+configuration defaults transaction fees and slippage to zero; response totals
+reflect those settings rather than estimated costs.
+
 ---
 
 ## Evolution from FinRL

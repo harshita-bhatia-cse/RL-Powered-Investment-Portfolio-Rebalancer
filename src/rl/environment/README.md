@@ -63,6 +63,11 @@ log(next_total_nav / current_total_nav)
 The allocator applies execution costs once. No additional reward-level
 transaction-cost penalty is applied.
 
+Strategies that need to retain their current positions can call
+`PortfolioTradingEnv.step_hold()`. It advances through the same next-session
+corporate-action processing and NAV marking without running the allocator or
+submitting trades; the environment still returns the normal NAV-based reward.
+
 ## Transition and corporate actions
 
 At the close of session `t`, the environment forms the observation and receives

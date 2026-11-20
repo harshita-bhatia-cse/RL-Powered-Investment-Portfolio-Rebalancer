@@ -266,6 +266,98 @@ class PortfolioEnvTests(unittest.TestCase):
         self.assertAlmostEqual(info["nav"], 200.0)
         self.assertEqual(info["corporate_actions_verified"], False)
 
+    def test_step_hold_marks_existing_holdings_at_moved_market_prices(self):
+        previous_day = pd.Timestamp("2018-01-03")
+        next_day = pd.Timestamp("2018-01-04")
+        self.market["SPY"].loc[
+            next_day, ["open", "high", "low", "close", "adj_close"]
+        ] = [100.0, 120.0, 100.0, 120.0, 120.0]
+        env = self.make_env(
+            partition="train",
+            initial_cash=0.0,
+            initial_holdings={"SPY": 10.0},
+        )
+        _, initial_info = env.reset(options={"start_date": previous_day})
+        previous_nav = initial_info["nav"]
+        previous_quantity = initial_info["holdings"]["SPY"]
+
+        _, reward, _, _, info = env.step_hold()
+
+        self.assertEqual(info["holdings"]["SPY"], previous_quantity)
+        self.assertEqual(info["nav"], 10.0 * 120.0)
+        self.assertGreater(info["nav"], previous_nav)
+        self.assertAlmostEqual(reward, np.log(info["nav"] / previous_nav))
+        self.assertEqual(info["trades"], ())
+        self.assertEqual(info["turnover_ratio"], 0.0)
+        self.assertEqual(info["transaction_fees"], 0.0)
+        self.assertEqual(info["slippage_cost"], 0.0)
+
+    def test_step_hold_applies_split_without_voluntary_rebalance(self):
+        event = CorporateActionEvent(
+            symbol="SPY",
+            event_type=CorporateActionType.SPLIT,
+            source_id="fixture-hold-split",
+            effective_date="2018-01-04",
+            split_ratio=2.0,
+        )
+        previous_day = pd.Timestamp("2018-01-03")
+        next_day = pd.Timestamp("2018-01-04")
+        self.market["SPY"].loc[
+            next_day, ["open", "high", "low", "close", "adj_close"]
+        ] = [50.0, 50.0, 50.0, 50.0, 50.0]
+        env = self.make_env(
+            partition="train",
+            initial_cash=0.0,
+            initial_holdings={"SPY": 2.0},
+            corporate_action_events=[event],
+        )
+        _, initial_info = env.reset(options={"start_date": previous_day})
+        previous_nav = initial_info["nav"]
+
+        _, reward, _, _, info = env.step_hold()
+
+        self.assertEqual(info["holdings"]["SPY"], 4.0)
+        self.assertAlmostEqual(info["nav"], previous_nav)
+        self.assertAlmostEqual(reward, np.log(info["nav"] / previous_nav))
+        self.assertEqual(info["trades"], ())
+        self.assertEqual(info["turnover_ratio"], 0.0)
+        self.assertEqual(info["transaction_fees"], 0.0)
+        self.assertEqual(info["slippage_cost"], 0.0)
+
+    def test_step_hold_records_dividend_receivable_in_nav_without_trades(self):
+        event = CorporateActionEvent(
+            symbol="SPY",
+            event_type=CorporateActionType.CASH_DIVIDEND,
+            source_id="fixture-hold-dividend",
+            ex_date="2018-01-04",
+            payment_date="2018-01-10",
+            distribution_per_share=2.0,
+        )
+        previous_day = pd.Timestamp("2018-01-03")
+        next_day = pd.Timestamp("2018-01-04")
+        self.market["SPY"].loc[
+            next_day, ["open", "high", "low", "close", "adj_close"]
+        ] = [100.0, 100.0, 98.0, 98.0, 98.0]
+        env = self.make_env(
+            partition="train",
+            initial_cash=0.0,
+            initial_holdings={"SPY": 10.0},
+            corporate_action_events=[event],
+        )
+        _, initial_info = env.reset(options={"start_date": previous_day})
+
+        _, _, _, _, info = env.step_hold()
+
+        self.assertEqual(
+            info["dividend_receivables"], {"SPY:fixture-hold-dividend": 20.0}
+        )
+        self.assertEqual(info["nav"], 10.0 * 98.0 + 20.0)
+        self.assertAlmostEqual(info["nav"], initial_info["nav"])
+        self.assertEqual(info["trades"], ())
+        self.assertEqual(info["turnover_ratio"], 0.0)
+        self.assertEqual(info["transaction_fees"], 0.0)
+        self.assertEqual(info["slippage_cost"], 0.0)
+
     def test_dividend_receivable_is_in_nav_but_not_available_to_allocator(self):
         event = CorporateActionEvent(
             symbol="SPY",
@@ -343,6 +435,30 @@ class PortfolioEnvTests(unittest.TestCase):
         self.assertEqual(info["date"], env.partition_dates[-1].date().isoformat())
         with self.assertRaisesRegex(RuntimeError, "reset"):
             env.step(action)
+
+    def test_step_hold_marks_existing_holdings_without_rebalancing(self):
+        env = self.make_env(
+            partition="train",
+            initial_cash=1_000.0,
+            initial_holdings={"SPY": 10.0},
+        )
+        _, initial_info = env.reset(seed=19)
+
+        observation, reward, terminated, truncated, info = env.step_hold()
+
+        self.assertTrue(env.observation_space.contains(observation))
+        self.assertEqual(reward, 0.0)
+        self.assertFalse(terminated)
+        self.assertFalse(truncated)
+        self.assertEqual(info["allocation_status"], "held")
+        self.assertFalse(info["allocation_rejected"])
+        self.assertEqual(info["turnover_ratio"], 0.0)
+        self.assertEqual(info["transaction_fees"], 0.0)
+        self.assertEqual(info["slippage_cost"], 0.0)
+        self.assertEqual(info["trades"], ())
+        self.assertEqual(info["turnover_ratio"], 0.0)
+        self.assertEqual(info["holdings"], initial_info["holdings"])
+        self.assertEqual(info["nav"], initial_info["nav"])
 
     def test_validation_and_test_require_training_scaler(self):
         for partition in ("validation", "test"):

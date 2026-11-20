@@ -353,23 +353,41 @@ class PortfolioTradingEnv(gym.Env[np.ndarray, np.ndarray]):
     def step(
         self, action: np.ndarray
     ) -> tuple[np.ndarray, float, bool, bool, dict]:
+        return self._step_transition(action, hold=False)
+
+    def step_hold(self) -> tuple[np.ndarray, float, bool, bool, dict]:
+        """Advance one session without changing holdings or submitting trades."""
+        return self._step_transition(None, hold=True)
+
+    def _step_transition(
+        self, action: Optional[np.ndarray], *, hold: bool
+    ) -> tuple[np.ndarray, float, bool, bool, dict]:
         if self._episode_done or self._ledger is None or self._current_date is None:
             raise RuntimeError("reset() must be called before step() and after termination")
 
-        raw_action = np.asarray(action, dtype=np.float64)
-        expected_shape = (len(ASSET_UNIVERSE) + 1,)
-        if raw_action.shape != expected_shape:
-            raise ValueError(f"action must have shape {expected_shape}")
-        if not np.isfinite(raw_action).all():
-            raise ValueError("action must contain only finite values")
-        clipped_action = np.clip(raw_action, self.action_space.low, self.action_space.high)
-        action_was_clipped = not np.array_equal(clipped_action, raw_action)
-        target = project_to_simplex(clipped_action)
-        target_weights = {
-            symbol: float(target[index])
-            for index, symbol in enumerate(ASSET_UNIVERSE)
-        }
-        target_cash_weight = float(target[-1])
+        action_was_clipped = False
+        if hold:
+            target_weights: dict[str, float] = {}
+            target_cash_weight = None
+        else:
+            if action is None:
+                raise ValueError("action must be a finite asset-plus-cash vector")
+            raw_action = np.asarray(action, dtype=np.float64)
+            expected_shape = (len(ASSET_UNIVERSE) + 1,)
+            if raw_action.shape != expected_shape:
+                raise ValueError(f"action must have shape {expected_shape}")
+            if not np.isfinite(raw_action).all():
+                raise ValueError("action must contain only finite values")
+            clipped_action = np.clip(
+                raw_action, self.action_space.low, self.action_space.high
+            )
+            action_was_clipped = not np.array_equal(clipped_action, raw_action)
+            target = project_to_simplex(clipped_action)
+            target_weights = {
+                symbol: float(target[index])
+                for index, symbol in enumerate(ASSET_UNIVERSE)
+            }
+            target_cash_weight = float(target[-1])
 
         next_position = self._current_position + 1
         next_date = self.partition_dates[next_position]
@@ -403,20 +421,22 @@ class PortfolioTradingEnv(gym.Env[np.ndarray, np.ndarray]):
             for symbol in ASSET_UNIVERSE
         }
         mark_prices = self._prices_at(next_date, "close")
-        plan = rebalance(
-            RebalanceRequest(
-                current_holdings=self._ledger.holdings,
-                available_cash=self._ledger.settled_cash,
-                prices={},
-                target_weights=target_weights,
-                target_cash_weight=target_cash_weight,
-                config=self.allocation_config,
-                execution_prices=execution_prices,
-                initial_mark_prices=initial_mark_prices,
-                mark_prices=mark_prices,
+        plan = None
+        if not hold:
+            plan = rebalance(
+                RebalanceRequest(
+                    current_holdings=self._ledger.holdings,
+                    available_cash=self._ledger.settled_cash,
+                    prices={},
+                    target_weights=target_weights,
+                    target_cash_weight=target_cash_weight,
+                    config=self.allocation_config,
+                    execution_prices=execution_prices,
+                    initial_mark_prices=initial_mark_prices,
+                    mark_prices=mark_prices,
+                )
             )
-        )
-        if plan.status is not PlanStatus.REJECTED:
+        if plan is not None and plan.status is not PlanStatus.REJECTED:
             self._ledger.update_investable_balances(
                 plan.final_holdings, plan.final_cash
             )
@@ -440,14 +460,22 @@ class PortfolioTradingEnv(gym.Env[np.ndarray, np.ndarray]):
                 "target_weights": target_weights,
                 "target_cash_weight": target_cash_weight,
                 "action_was_clipped": action_was_clipped,
-                "allocation_status": plan.status.value,
-                "allocation_rejected": plan.status is PlanStatus.REJECTED,
-                "rejection_reasons": plan.rejection_reasons,
-                "trades": plan.trades,
-                "transaction_fees": plan.total_fees,
-                "slippage_cost": plan.total_slippage_cost,
-                "turnover_ratio": plan.turnover_ratio,
-                "allocation_final_nav": plan.final_nav,
+                "allocation_status": (
+                    plan.status.value if plan is not None else "held"
+                ),
+                "allocation_rejected": (
+                    plan.status is PlanStatus.REJECTED if plan is not None else False
+                ),
+                "rejection_reasons": plan.rejection_reasons if plan is not None else (),
+                "trades": plan.trades if plan is not None else (),
+                "transaction_fees": plan.total_fees if plan is not None else 0.0,
+                "slippage_cost": (
+                    plan.total_slippage_cost if plan is not None else 0.0
+                ),
+                "turnover_ratio": plan.turnover_ratio if plan is not None else 0.0,
+                "allocation_final_nav": (
+                    plan.final_nav if plan is not None else snapshot.total_nav
+                ),
                 "allocator_available_cash": allocator_available_cash,
                 "episode_terminated": terminated,
             }
