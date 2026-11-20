@@ -88,7 +88,10 @@ def main():
             )
 
         elif args.command == 'backtest':
-            from backtest.backtest_engine import main as backtest_main
+            if __package__:
+                from .backtest.backtest_engine import main as backtest_main
+            else:
+                from backtest.backtest_engine import main as backtest_main
             backtest_main()
 
         elif args.command == 'trade':

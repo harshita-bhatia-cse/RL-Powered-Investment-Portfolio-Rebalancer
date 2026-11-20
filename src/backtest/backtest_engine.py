@@ -622,7 +622,7 @@ def run_multiple_backtests(strategies: List, price_data: pd.DataFrame,
     return results
 
 
-if __name__ == "__main__":
+def main():
     # 示例：读取选股权重文件（gvkey 作为 ticker，weight 为权重，date 为目标调仓日）
     logging.basicConfig(level=logging.INFO)
 
@@ -732,3 +732,7 @@ if __name__ == "__main__":
     metrics_df = result.to_metrics_dataframe()
     print("\n指标对比表：")
     print(metrics_df)
+
+
+if __name__ == "__main__":
+    main()
