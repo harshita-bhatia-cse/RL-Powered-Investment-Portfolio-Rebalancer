@@ -273,19 +273,31 @@
                     <article>
                         <span>PPO ending NAV</span>
                         <strong id="ppo-nav">—</strong>
-                        <small>Starting NAV: 100,000 simulation units</small>
+                        <small>Same evaluation capital as benchmarks</small>
                     </article>
 
                     <article>
                         <span>Equal-weight NAV</span>
                         <strong id="equal-nav">—</strong>
-                        <small>Rebalanced baseline</small>
+                        <small>Daily rebalancing</small>
                     </article>
 
                     <article>
-                        <span>Buy-and-hold NAV</span>
+                        <span>SPY buy-and-hold NAV</span>
                         <strong id="buyhold-nav">—</strong>
-                        <small>Initial equal allocation</small>
+                        <small>SPY-only buy-and-hold benchmark</small>
+                    </article>
+
+                    <article>
+                        <span>Monthly rebalancing NAV</span>
+                        <strong id="monthly-nav">—</strong>
+                        <small>Equal-weight targets</small>
+                    </article>
+
+                    <article>
+                        <span>Threshold rebalancing NAV</span>
+                        <strong id="threshold-nav">—</strong>
+                        <small>Equal-weight drift threshold</small>
                     </article>
 
                     <article>
@@ -360,6 +372,6 @@
 
 </main>
 
-<script src="/static/app.js?v=3"></script>
+<script src="/static/app.js?v=5"></script>
 </body>
 </html>

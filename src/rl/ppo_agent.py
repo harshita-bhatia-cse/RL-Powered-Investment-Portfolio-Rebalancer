@@ -62,6 +62,9 @@ class EvaluationStep:
     transaction_cost: float
     terminated: bool
     truncated: bool
+    daily_navs: tuple[float, ...] = ()
+    requested_weights: dict[str, float] | None = None
+    applied_weights: dict[str, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -233,6 +236,7 @@ def evaluate_ppo(
         if not env.action_space.contains(action_array):
             raise ValueError("model prediction is outside the environment action space")
         next_observation, reward, terminated, truncated, info = env.step(action_array)
+        daily_navs = _daily_navs(base_env, info)
         observation_copy = np.array(next_observation, dtype=np.float32, copy=True)
         action_copy = np.array(action_array, dtype=np.float32, copy=True)
         observation_copy.setflags(write=False)
@@ -244,6 +248,8 @@ def evaluate_ppo(
                 reward=float(reward),
                 nav=float(info["nav"]),
                 weights=dict(info["weights"]),
+                requested_weights=dict(info["requested_weights"]),
+                applied_weights=dict(info["applied_weights"]),
                 gross_turnover=float(info["gross_turnover"]),
                 one_way_turnover=float(info["one_way_turnover"]),
                 transaction_fees=float(info["transaction_fees"]),
@@ -251,6 +257,7 @@ def evaluate_ppo(
                 transaction_cost=float(info["transaction_cost"]),
                 terminated=terminated,
                 truncated=truncated,
+                daily_navs=daily_navs,
             )
         )
         observation = next_observation
@@ -483,6 +490,40 @@ def _validate_model_dimensions(model: Any) -> None:
 def _base_environment(env: gym.Env) -> Any:
     unwrapped = getattr(env, "unwrapped", env)
     return unwrapped
+
+
+def _daily_navs(env: Any, info: Mapping[str, Any]) -> tuple[float, ...]:
+    """Reconstruct the exact daily marked NAV path for one rebalance interval."""
+    start = int(info["session_start"])
+    end = int(info["session_end"])
+    returns = np.asarray(env.asset_returns[start:end], dtype=np.float64)
+    if returns.ndim != 2 or len(returns) != end - start or len(returns) == 0:
+        raise ValueError("evaluation transition has an invalid daily return interval")
+
+    weight_map = info["applied_weights"]
+    weights = np.asarray(
+        [*(weight_map[name] for name in ASSET_UNIVERSE), weight_map["CASH"]],
+        dtype=np.float64,
+    )
+    if not np.isfinite(weights).all() or not np.isclose(weights.sum(), 1.0):
+        raise ValueError("evaluation transition has invalid applied weights")
+
+    nav = float(info["post_cost_nav"])
+    asset_growth = np.ones(returns.shape[1], dtype=np.float64)
+    daily_navs: list[float] = []
+    for session_returns in returns:
+        asset_growth *= 1.0 + session_returns
+        nav = float(
+            info["post_cost_nav"]
+            * (np.dot(weights[:-1], asset_growth) + weights[-1])
+        )
+        if not np.isfinite(nav) or nav <= 0.0:
+            raise FloatingPointError("daily PPO evaluation NAV is invalid")
+        daily_navs.append(nav)
+
+    if not np.isclose(daily_navs[-1], float(info["nav"]), rtol=1e-10, atol=1e-7):
+        raise RuntimeError("daily PPO evaluation NAV does not match the environment")
+    return tuple(daily_navs)
 
 
 def _sha256_file(path: Path) -> str:

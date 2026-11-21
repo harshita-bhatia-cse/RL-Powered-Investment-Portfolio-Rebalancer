@@ -261,36 +261,49 @@ def _get_ppo_validation_result():
     artifact_dir = Path(
         os.environ.get(
             "PPO_ARTIFACT_DIR",
-            str(Path(__file__).resolve().parents[3] / "phase_5_16_artifacts_20261114"),
+            str(Path(__file__).resolve().parents[2] / ".artifacts" / "ppo"),
         )
     ).expanduser()
 
-    model_path = artifact_dir / "trained_synthetic_ppo_seed42.zip"
+    model_path = next(
+        (
+            candidate
+            for candidate in (
+                artifact_dir / "trained_synthetic_ppo_seed42.zip",
+                artifact_dir / "model.zip",
+            )
+            if candidate.is_file()
+        ),
+        artifact_dir / "trained_synthetic_ppo_seed42.zip",
+    )
     report_path = artifact_dir / "validation_results.json"
 
-    if not model_path.is_file() or not report_path.is_file():
+    if not model_path.is_file():
         raise HTTPException(
             status_code=503,
-            detail="PPO model or validation report is missing. Check PPO_ARTIFACT_DIR.",
+            detail=(
+                f"Synthetic PPO model not found in {artifact_dir}. "
+                "Run `python -m scripts.train_synthetic_ppo_dashboard` or set "
+                "PPO_ARTIFACT_DIR to a folder containing a compatible model."
+            ),
         )
 
     try:
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-
-        if report.get("source_type") != "synthetic" or report.get("synthetic") is not True:
-            raise ValueError("Validation report is not marked as synthetic.")
-
-        if report.get("training_validation_seeds_distinct") is not True:
-            raise ValueError("Training and validation seeds are not verified as distinct.")
-
-        if report.get("validation_was_used_for_training_or_model_selection") is not False:
-            raise ValueError("Validation data usage is not verified.")
+        report = None
+        if report_path.is_file():
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            if report.get("source_type") != "synthetic" or report.get("synthetic") is not True:
+                raise ValueError("Validation report is not marked as synthetic.")
+            if report.get("training_validation_seeds_distinct") is not True:
+                raise ValueError("Training and validation seeds are not verified as distinct.")
+            if report.get("validation_was_used_for_training_or_model_selection") is not False:
+                raise ValueError("Validation data usage is not verified.")
 
         from src.rl.ppo_agent import (
             build_ppo_environments,
-            evaluate_ppo,
             load_ppo_model,
         )
+        from src.rl.phase4_evaluation import evaluate_phase4
         from src.rl.ppo_config import PPOConfig
 
         bundle = build_ppo_environments(seed=42)
@@ -301,37 +314,81 @@ def _get_ppo_validation_result():
             expected_config=PPOConfig(seed=42, device="cpu"),
         )
 
-        result = evaluate_ppo(
+        evaluation = evaluate_phase4(
             model,
             bundle.validation_env,
-            deterministic=True,
+            initial_capital=(
+                float(report["starting_nav"])
+                if report is not None
+                else None
+            ),
         )
+        fresh_ppo = evaluation["ppo"]
+
+        if report is None:
+            return {
+                "source_type": "synthetic",
+                "synthetic": True,
+                "scenario_id": fresh_ppo["scenario_id"],
+                "scenario_seed": str(fresh_ppo["seed"]),
+                "steps": fresh_ppo["steps"],
+                "starting_nav": float(fresh_ppo["initial_portfolio_value"]),
+                "ppo": {
+                    "ending_nav": float(fresh_ppo["final_portfolio_value"]),
+                    "episode_reward": float(fresh_ppo["episode_reward"]),
+                    "gross_turnover_sum": float(fresh_ppo["gross_turnover_sum"]),
+                    "one_way_turnover_sum": float(fresh_ppo["one_way_turnover_sum"]),
+                    "transaction_fees_sum": float(fresh_ppo["transaction_fees_sum"]),
+                    "slippage_cost_sum": float(fresh_ppo["slippage_cost_sum"]),
+                    "transaction_cost_sum": float(fresh_ppo["transaction_cost_sum"]),
+                    "ending_weights": fresh_ppo["ending_weights"],
+                    "terminated": fresh_ppo["terminated"],
+                    "truncated": fresh_ppo["truncated"],
+                },
+                "baselines": {},
+                "evaluation": {
+                    "evaluation_type": evaluation["evaluation_type"],
+                    "period": evaluation["period"],
+                    "cost_assumptions": evaluation["cost_assumptions"],
+                    "strategies": evaluation["strategies"],
+                },
+                "evaluation_source": "fresh_deterministic_model_evaluation",
+                "baseline_source": "shared_evaluation_engine",
+                "note": (
+                    "No saved validation report was found. All displayed strategy "
+                    "metrics were calculated by the shared evaluation engine."
+                ),
+            }
 
         scenario_id = report["scenario_id"]
         scenario_seed = report["scenario_seed"]
         saved_ppo = report["ppo"]
         baselines = report["baselines"]
 
-        if result.scenario_id != scenario_id or result.seed != scenario_seed:
+        if (
+            fresh_ppo["scenario_id"] != scenario_id
+            or str(fresh_ppo["seed"]) != str(scenario_seed)
+        ):
             raise ValueError("Fresh PPO evaluation does not match the saved validation scenario.")
 
-        if saved_ppo["scenario_id"] != scenario_id or saved_ppo["scenario_seed"] != scenario_seed:
+        if (
+            saved_ppo["scenario_id"] != scenario_id
+            or str(saved_ppo["scenario_seed"]) != str(scenario_seed)
+        ):
             raise ValueError("Saved PPO metrics refer to a different validation scenario.")
 
-        if len(result.steps) != saved_ppo["steps"]:
+        if fresh_ppo["steps"] != saved_ppo["steps"]:
             raise ValueError("Fresh PPO evaluation has a different number of steps.")
-
-        last_step = result.steps[-1]
 
         # Confirm that fresh deterministic evaluation reproduces the saved PPO metrics.
         checks = {
-            "ending_nav": last_step.nav,
-            "episode_reward": sum(step.reward for step in result.steps),
-            "gross_turnover_sum": sum(step.gross_turnover for step in result.steps),
-            "one_way_turnover_sum": sum(step.one_way_turnover for step in result.steps),
-            "transaction_fees_sum": sum(step.transaction_fees for step in result.steps),
-            "slippage_cost_sum": sum(step.slippage_cost for step in result.steps),
-            "transaction_cost_sum": sum(step.transaction_cost for step in result.steps),
+            "ending_nav": fresh_ppo["final_portfolio_value"],
+            "episode_reward": fresh_ppo["episode_reward"],
+            "gross_turnover_sum": fresh_ppo["gross_turnover_sum"],
+            "one_way_turnover_sum": fresh_ppo["one_way_turnover_sum"],
+            "transaction_fees_sum": fresh_ppo["transaction_fees_sum"],
+            "slippage_cost_sum": fresh_ppo["slippage_cost_sum"],
+            "transaction_cost_sum": fresh_ppo["transaction_cost_sum"],
         }
 
         for key, fresh_value in checks.items():
@@ -358,7 +415,7 @@ def _get_ppo_validation_result():
             if (
                 baseline["scenario_id"] != scenario_id
                 or baseline["scenario_seed"] != scenario_seed
-                or baseline["steps"] != len(result.steps)
+                or baseline["steps"] != fresh_ppo["steps"]
             ):
                 raise ValueError("A baseline refers to a different validation scenario.")
 
@@ -382,26 +439,29 @@ def _get_ppo_validation_result():
         return {
             "source_type": "synthetic",
             "synthetic": True,
-            "scenario_id": result.scenario_id,
-            "scenario_seed": str(result.seed),
-            "steps": len(result.steps),
+            "scenario_id": fresh_ppo["scenario_id"],
+            "scenario_seed": str(fresh_ppo["seed"]),
+            "steps": fresh_ppo["steps"],
             "starting_nav": float(report["starting_nav"]),
             "ppo": {
-                "ending_nav": float(last_step.nav),
+                "ending_nav": float(fresh_ppo["final_portfolio_value"]),
                 "episode_reward": float(checks["episode_reward"]),
                 "gross_turnover_sum": float(checks["gross_turnover_sum"]),
                 "one_way_turnover_sum": float(checks["one_way_turnover_sum"]),
                 "transaction_fees_sum": float(checks["transaction_fees_sum"]),
                 "slippage_cost_sum": float(checks["slippage_cost_sum"]),
                 "transaction_cost_sum": float(checks["transaction_cost_sum"]),
-                "ending_weights": {
-                    key: float(value)
-                    for key, value in last_step.weights.items()
-                },
-                "terminated": bool(last_step.terminated),
-                "truncated": bool(last_step.truncated),
+                "ending_weights": fresh_ppo["ending_weights"],
+                "terminated": fresh_ppo["terminated"],
+                "truncated": fresh_ppo["truncated"],
             },
             "baselines": baseline_results,
+            "evaluation": {
+                "evaluation_type": evaluation["evaluation_type"],
+                "period": evaluation["period"],
+                "cost_assumptions": evaluation["cost_assumptions"],
+                "strategies": evaluation["strategies"],
+            },
             "evaluation_source": "fresh_deterministic_model_evaluation",
             "baseline_source": "saved_validation_report",
             "note": report["notes"],

@@ -25,8 +25,11 @@ if (ppoButton) {
             maximumFractionDigits: 2
         });
 
-    const formatReward = value =>
+    const formatPercent = value =>
         `${(Number(value) * 100).toFixed(2)}%`;
+
+    const formatRatio = value =>
+        Number(value).toFixed(3);
 
     function addPpoResultRow(container, label, value) {
         const row = document.createElement('div');
@@ -59,70 +62,75 @@ if (ppoButton) {
                 );
             }
 
+            const evaluation = data.evaluation;
+            const strategies = evaluation?.strategies;
             if (
                 data.source_type !== 'synthetic' ||
                 data.synthetic !== true ||
-                !data.ppo ||
-                !data.baselines
+                !evaluation ||
+                evaluation.evaluation_type !== 'synthetic-only' ||
+                !strategies
             ) {
                 throw new Error('Unexpected validation response.');
             }
 
-            const ppo = data.ppo;
-            const equal = data.baselines.equal_weight_rebalanced;
-            const buyHold =
-                data.baselines.buy_and_hold_after_initial_equal_target;
-
-            if (!equal || !buyHold) {
-                throw new Error('Baseline results are missing.');
+            const requiredStrategies = [
+                'Synthetic PPO',
+                'SPY buy-and-hold',
+                'Equal-weight',
+                'Monthly rebalancing',
+                'Threshold rebalancing'
+            ];
+            if (requiredStrategies.some(name => !strategies[name])) {
+                throw new Error('One or more evaluation strategies are missing.');
             }
 
-            // Main metrics
+            const ppo = strategies['Synthetic PPO'];
             document.querySelector('#ppo-nav').textContent =
-                formatNumber(ppo.ending_nav);
+                formatNumber(ppo.final_portfolio_value);
 
             document.querySelector('#equal-nav').textContent =
-                formatNumber(equal.ending_nav);
+                formatNumber(strategies['Equal-weight'].final_portfolio_value);
 
             document.querySelector('#buyhold-nav').textContent =
-                formatNumber(buyHold.ending_nav);
+                formatNumber(strategies['SPY buy-and-hold'].final_portfolio_value);
+
+            document.querySelector('#monthly-nav').textContent =
+                formatNumber(strategies['Monthly rebalancing'].final_portfolio_value);
+
+            document.querySelector('#threshold-nav').textContent =
+                formatNumber(strategies['Threshold rebalancing'].final_portfolio_value);
 
             document.querySelector('#ppo-cost').textContent =
-                formatNumber(ppo.transaction_cost_sum);
+                formatNumber(ppo.total_transaction_costs);
 
-            // Strategy comparison
             const comparison =
                 document.querySelector('#ppo-comparison');
 
             comparison.replaceChildren();
 
-            const strategies = [
-                ['PPO', ppo],
-                ['Equal-weight rebalanced', equal],
-                ['Buy-and-hold', buyHold]
+            const metricRows = [
+                ['Final portfolio value', 'final_portfolio_value', formatNumber],
+                ['Cumulative return', 'cumulative_return', formatPercent],
+                ['Annualized return', 'annualized_return', formatPercent],
+                ['Annualized volatility', 'annualized_volatility', formatPercent],
+                ['Sharpe ratio', 'sharpe_ratio', formatRatio],
+                ['Sortino ratio', 'sortino_ratio', formatRatio],
+                ['Maximum drawdown', 'maximum_drawdown', formatPercent],
+                ['Transaction costs', 'total_transaction_costs', formatNumber],
+                ['One-way turnover', 'portfolio_turnover', formatRatio]
             ];
 
-            strategies.forEach(([name, strategy]) => {
-                addPpoResultRow(
-                    comparison,
-                    `${name} · Ending NAV`,
-                    formatNumber(strategy.ending_nav)
-                );
-
-                addPpoResultRow(
-                    comparison,
-                    `${name} · Reward`,
-                    formatReward(strategy.episode_reward)
-                );
-
-                addPpoResultRow(
-                    comparison,
-                    `${name} · Transaction costs`,
-                    formatNumber(strategy.transaction_cost_sum)
-                );
+            Object.entries(strategies).forEach(([name, metrics]) => {
+                metricRows.forEach(([label, key, format]) => {
+                    addPpoResultRow(
+                        comparison,
+                        `${name} · ${label}`,
+                        format(metrics[key])
+                    );
+                });
             });
 
-            // PPO final allocation
             const weights =
                 document.querySelector('#ppo-weights');
 
@@ -138,17 +146,18 @@ if (ppoButton) {
                     );
                 });
 
-            // Scenario information
             document.querySelector('#ppo-scenario').textContent =
                 `Scenario: ${data.scenario_id} | ` +
                 `Seed: ${data.scenario_seed} | ` +
-                `Decisions: ${data.steps}`;
+                `Decisions: ${data.steps} | ` +
+                `Sessions: ${evaluation.period.evaluation_sessions} | ` +
+                `Initial capital: ${formatNumber(evaluation.cost_assumptions.initial_capital)}`;
 
             ppoResults.hidden = false;
 
             ppoMessage.className = 'form-message';
             ppoMessage.textContent =
-                'Validation completed. PPO results reproduced successfully.';
+                'PPO and benchmark evaluation completed successfully.';
 
         } catch (error) {
             ppoMessage.className = 'form-message error';

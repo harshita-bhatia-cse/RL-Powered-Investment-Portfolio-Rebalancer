@@ -143,8 +143,15 @@ class PPOAgentTests(unittest.TestCase):
             self.assertEqual(step.observation.shape, (43,))
             self.assertEqual(step.action.shape, (7,))
             self.assertTrue(np.isfinite(step.action).all())
+            self.assertEqual(step.requested_weights.keys(), step.applied_weights.keys())
+            self.assertAlmostEqual(sum(step.requested_weights.values()), 1.0, places=8)
+            self.assertAlmostEqual(sum(step.applied_weights.values()), 1.0, places=8)
+            self.assertTrue(all(weight >= 0.0 for weight in step.applied_weights.values()))
             self.assertTrue(np.isfinite(step.reward))
             self.assertGreater(step.nav, 0)
+            self.assertEqual(len(step.daily_navs), 21)
+            self.assertTrue(np.isfinite(step.daily_navs).all())
+            self.assertAlmostEqual(step.daily_navs[-1], step.nav, places=7)
             self.assertGreaterEqual(step.gross_turnover, 0.0)
             self.assertAlmostEqual(
                 step.one_way_turnover, step.gross_turnover / 2.0
