@@ -13,6 +13,7 @@ from src.rl.synthetic_data import (
     generate_synthetic_splits,
 )
 from src.rl.synthetic_pipeline import (
+    RandomizedEpisodeHorizonEnv,
     build_synthetic_pipeline,
     run_deterministic_actions,
 )
@@ -53,6 +54,86 @@ def deterministic_accounting_dataset():
 
 
 class SyntheticPipelineIntegrationTests(unittest.TestCase):
+    def test_randomized_horizons_are_seeded_and_stay_within_complete_periods(self):
+        config = SyntheticMarketConfig(sessions=756)
+        first_pipeline = build_synthetic_pipeline(config, seed=715)
+        second_pipeline = build_synthetic_pipeline(config, seed=715)
+        first = RandomizedEpisodeHorizonEnv(
+            first_pipeline.environments["train"],
+            min_episode_decisions=11,
+            max_episode_decisions=33,
+            seed=902,
+        )
+        second = RandomizedEpisodeHorizonEnv(
+            second_pipeline.environments["train"],
+            min_episode_decisions=11,
+            max_episode_decisions=33,
+            seed=902,
+        )
+
+        first_horizons = []
+        second_horizons = []
+        for _ in range(20):
+            _, first_info = first.reset()
+            _, second_info = second.reset()
+            first_horizons.append(first_info["episode_horizon_decisions"])
+            second_horizons.append(second_info["episode_horizon_decisions"])
+            for info in (first_info, second_info):
+                decisions = info["episode_horizon_decisions"]
+                self.assertGreaterEqual(decisions, 11)
+                self.assertLessEqual(decisions, 33)
+                self.assertEqual(info["episode_horizon_sessions"], decisions * 21)
+                self.assertEqual(info["episode_endpoint_index"], 63 + decisions * 21)
+
+        self.assertEqual(first_horizons, second_horizons)
+        _, seeded_info = first.reset(seed=1234)
+        _, repeated_seeded_info = first.reset(seed=1234)
+        self.assertEqual(
+            seeded_info["episode_horizon_decisions"],
+            repeated_seeded_info["episode_horizon_decisions"],
+        )
+
+    def test_randomized_horizon_terminates_on_sampled_endpoint_and_scales_time(self):
+        pipeline = build_synthetic_pipeline(
+            SyntheticMarketConfig(sessions=63 + 4 * 21), seed=718
+        )
+        environment = RandomizedEpisodeHorizonEnv(
+            pipeline.environments["train"],
+            min_episode_decisions=4,
+            max_episode_decisions=4,
+            seed=3,
+        )
+
+        observation, reset_info = environment.reset(seed=4)
+        self.assertEqual(reset_info["episode_horizon_decisions"], 4)
+        self.assertAlmostEqual(float(observation[-1]), 1.0)
+        action = np.asarray([-1, -1, -1, -1, -1, -1, 1], dtype=np.float32)
+
+        for decision in range(1, 5):
+            observation, _, terminated, truncated, info = environment.step(action)
+            self.assertEqual(info["sessions_in_interval"], 21)
+            self.assertAlmostEqual(float(observation[-1]), (4 - decision) / 4)
+            self.assertEqual(terminated, decision == 4)
+            self.assertFalse(truncated)
+
+    def test_randomized_horizon_rejects_non_training_scenarios_and_invalid_bounds(self):
+        pipeline = build_synthetic_pipeline(
+            SyntheticMarketConfig(sessions=756), seed=719
+        )
+        with self.assertRaisesRegex(ValueError, "training scenarios only"):
+            RandomizedEpisodeHorizonEnv(
+                pipeline.environments["validation"],
+                min_episode_decisions=11,
+                seed=1,
+            )
+        with self.assertRaisesRegex(ValueError, "fit complete periods"):
+            RandomizedEpisodeHorizonEnv(
+                pipeline.environments["train"],
+                min_episode_decisions=11,
+                max_episode_decisions=34,
+                seed=1,
+            )
+
     def test_builds_and_checks_three_independent_environments(self):
         pipeline = build_synthetic_pipeline(
             SyntheticMarketConfig(sessions=110), seed=314

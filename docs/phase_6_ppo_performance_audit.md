@@ -93,15 +93,43 @@ one-way turnover, and $910.81 total costs ($607.20 fees plus $303.60
 slippage). This average applied cash differs from terminal marked cash because
 the measurements describe different things.
 
+## Phase 6.4 observation-to-action diagnostics
+
+`EvaluationStep.decision_observation` now preserves the exact 43-value
+observation passed to deterministic `model.predict()` before the environment
+step. The existing `EvaluationStep.observation` field retains its previous
+post-step meaning. The optional observation-diagnostics callback on
+`evaluate_ppo_synthetic()` and `evaluate_phase4()` exposes a separate trace
+without changing their default metrics or API response.
+
+Each decision record includes the raw observation vector and named features:
+
+- Per-asset one-, five-, and 21-session returns, plus 21- and 63-session
+  volatility.
+- Benchmark one-session return and 21-session volatility.
+- Actual VIX level, its scaled model input, and the scale used.
+- Current asset weights and cash weight, portfolio-value ratio, drawdown, and
+  fraction of the episode remaining.
+- The raw PPO action, requested target weights, applied weights, reward, and
+  interval-ending NAV.
+
+The training/validation script saves this trace separately as
+`.artifacts/ppo/ppo_observation_action_diagnostics.json`. The artifact was
+generated for all 33 decisions using the existing saved synthetic model and
+its validation scenario. This was deterministic inference only; PPO was not
+retrained. The regenerated metrics, actions, and allocations matched the
+existing evidence, and both `evaluation.json` and `ppo_diagnostics.json` were
+verified unchanged.
+
 ## Tests and verification
 
-- Focused PPO, evaluation, and API tests: **22 passed**.
+- Focused PPO and evaluation tests: **19 passed**.
 - Full offline pytest suite, excluding `tests/test_alpha_vantage.py`:
-  **200 passed, 14 warnings, 35 subtests passed**.
+  **201 passed, 14 warnings, 35 subtests passed**.
 - Python compilation and `git diff --check`: passed.
 - The saved model reproduced the existing return, Sharpe, drawdown, and cost
-  metrics; `evaluation.json` was confirmed unchanged after writing
-  `ppo_diagnostics.json`.
+  metrics, raw actions, and allocations; both previous evaluation artifacts
+  were confirmed unchanged after writing the new observation/action trace.
 - No model training, PPO configuration change, reward change, dashboard
   modification, broker call, or historical-data access was performed.
 
@@ -110,14 +138,15 @@ the measurements describe different things.
 - [`ppo_agent.py`](../src/rl/ppo_agent.py): `EvaluationStep`, `evaluate_ppo()`.
 - [`phase4_evaluation.py`](../src/rl/phase4_evaluation.py):
   `evaluate_ppo_synthetic()`, `summarize_allocation_diagnostics()`,
-  `save_phase4_diagnostics()`.
+  `build_observation_action_diagnostics()`, and the diagnostics savers.
 - [`train_synthetic_ppo_dashboard.py`](../scripts/train_synthetic_ppo_dashboard.py):
   future explicit artifact saving.
 - [`test_ppo_agent.py`](../tests/rl/test_ppo_agent.py): per-step allocation
   capture and validity.
 - [`test_phase4_workflow.py`](../tests/rl/test_phase4_workflow.py): diagnostic
-  summaries, invalid allocation rejection, cost accounting, and preservation
-  of the existing evaluation file.
+  summaries, observation/action alignment, JSON serialization, decision
+  counts, invalid allocation rejection, cost accounting, and preservation of
+  existing evaluation files.
 - Existing synthetic evidence:
   [`evaluation.json`](../.artifacts/ppo/evaluation.json),
   [`experiment.json`](../.artifacts/ppo/experiment.json), and
@@ -125,7 +154,61 @@ the measurements describe different things.
 
 ## Remaining limitations
 
-Diagnostics cover rebalance-point allocations, not daily marked allocation
-history or training learning curves. Evaluation remains one seed and one
-validation path. A controlled multi-seed synthetic robustness study is still
-needed before making policy-quality claims.
+Diagnostics cover rebalance-point observations and allocations, not daily
+marked allocation history or training learning curves. Evaluation remains one
+seed and one validation path. A controlled multi-seed synthetic robustness
+study is still needed before making policy-quality claims.
+
+## Phase 7.0 — Configuration B randomized training horizons
+
+The optional `RandomizedEpisodeHorizonEnv` wrapper is applied only to the
+synthetic training split by `build_ppo_environments()`. It samples an inclusive
+uniform number of complete rebalance decisions (default 11 through the maximum
+available, 33 for the 756-session configuration) using an explicit horizon
+seed. Each sampled endpoint includes the 63-session warm-up plus complete
+21-session periods. The base environment remains fixed-length by default;
+validation and test environments are unchanged.
+
+Use the explicit training command
+`python -m scripts.train_synthetic_ppo_dashboard --randomized-training-horizons`
+to opt in. This mode defaults to the separate
+`.artifacts/ppo_randomized_horizon/seed42` directory and refuses to write
+inside `.artifacts/ppo` or over a non-empty experiment directory. No model was
+trained for this implementation task.
+
+## Phase 7.0 — Configuration C without time remaining
+
+The default observation schema remains
+`synthetic_portfolio_v1_with_time` (43 features). The opt-in
+`synthetic_portfolio_v1_without_time` schema removes only
+`time_remaining_fraction`, yielding 42 features with all preceding values in
+the same order. New model manifests record the schema name, schema version,
+and observation shape; schema-less legacy manifests are interpreted as the
+existing 43-feature schema only.
+
+Select the no-time schema with
+`python -m scripts.train_synthetic_ppo_dashboard --observation-schema synthetic_portfolio_v1_without_time`.
+This mode defaults to `.artifacts/ppo_without_time/seed42`, requires a new or
+empty output directory, and refuses paths inside `.artifacts/ppo` or
+`.artifacts/ppo_randomized_horizon`. Configuration B randomized horizons and
+Configuration C are deliberately rejected together. No model was trained for
+this implementation task.
+
+## Phase 7.2 — Experiment protocol and safe run planning
+
+The versioned protocol is
+[`phase7_2_experiment_protocol.json`](../configs/phase7_2_experiment_protocol.json).
+It fixes configurations A/B/C, training seeds 101/202/303/404/505, validation
+roots 7201–7220, reserved test roots 9201–9220, common PPO and generator
+settings, costs, initial capital, and the 693-session/33-decision evaluation
+window. B uses complete horizons of 11–33 decisions and records one sampler
+seed per training seed.
+
+`src/rl/phase7_experiment.py` validates the protocol and seed-role separation,
+plans a unique `.artifacts/phase7_2/config_<A|B|C>/seed_<n>` directory for
+each run, and can reserve the full set of output directories only after
+checking all paths. It refuses to use `.artifacts/ppo`. Run metadata is
+validated against the protocol before a Phase 7.2 `TrainingOrchestrator` call
+and is copied into the model manifest and experiment metadata. This work adds
+preparation only; no model training, validation evaluation, or test evaluation
+has been performed.

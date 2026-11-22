@@ -15,7 +15,21 @@ from src.rl.ppo_agent import (
     train_ppo,
 )
 from src.rl.ppo_config import PPOConfig, TrainingOptions
-from src.rl.synthetic_data import SyntheticMarketConfig, generate_synthetic_market
+from src.rl.environment.synthetic_portfolio_env import (
+    DEFAULT_OBSERVATION_SCHEMA,
+    OBSERVATION_SCHEMA_WITHOUT_TIME,
+    SyntheticPortfolioEnv,
+)
+from src.rl.phase7_experiment import (
+    build_phase72_run_metadata,
+    load_phase72_protocol,
+)
+from src.rl.synthetic_data import (
+    SyntheticMarketConfig,
+    generate_synthetic_market,
+    generate_synthetic_splits,
+)
+from src.rl.synthetic_pipeline import RandomizedEpisodeHorizonEnv
 
 
 class PPOAgentTests(unittest.TestCase):
@@ -112,6 +126,48 @@ class PPOAgentTests(unittest.TestCase):
             3,
         )
 
+    def test_training_horizon_randomization_is_opt_in_and_training_only(self):
+        fixed_bundle = build_ppo_environments(
+            SyntheticMarketConfig(sessions=130), seed=411
+        )
+        self.assertIs(
+            fixed_bundle.train_env.unwrapped,
+            fixed_bundle.pipeline.environments["train"],
+        )
+        _, fixed_info = fixed_bundle.train_env.reset(seed=4)
+        self.assertNotIn("episode_horizon_decisions", fixed_info)
+        self.assertEqual(len(fixed_bundle.train_env.unwrapped.asset_returns), 130)
+
+        randomized_bundle = build_ppo_environments(
+            SyntheticMarketConfig(sessions=130),
+            seed=412,
+            randomize_training_horizons=True,
+            min_episode_decisions=1,
+            max_episode_decisions=3,
+            horizon_seed=93,
+        )
+        self.assertIsInstance(
+            randomized_bundle.train_env.env,
+            RandomizedEpisodeHorizonEnv,
+        )
+        self.assertIsInstance(randomized_bundle.validation_env, SyntheticPortfolioEnv)
+        self.assertIsInstance(randomized_bundle.test_env, SyntheticPortfolioEnv)
+        self.assertEqual(
+            len(randomized_bundle.validation_env.asset_returns),
+            130,
+        )
+        self.assertEqual(len(randomized_bundle.test_env.asset_returns), 130)
+        _, train_info = randomized_bundle.train_env.reset()
+        self.assertIn(train_info["episode_horizon_decisions"], (1, 2, 3))
+        self.assertNotIn(
+            "episode_horizon_decisions",
+            randomized_bundle.validation_env.reset(seed=5)[1],
+        )
+        self.assertNotIn(
+            "episode_horizon_decisions",
+            randomized_bundle.test_env.reset(seed=5)[1],
+        )
+
     def test_agent_dimensions_and_deterministic_prediction(self):
         model = create_ppo_agent(self.bundle.train_env, self.config)
         self.assertEqual(model.observation_space.shape, (43,))
@@ -139,8 +195,15 @@ class PPOAgentTests(unittest.TestCase):
         self.assertEqual(result.seed, self.bundle.pipeline.datasets.validation.seed)
         self.assertEqual(result.initial_observation.shape, (43,))
         self.assertEqual(len(result.steps), 2)
-        for step in result.steps:
+        for index, step in enumerate(result.steps):
             self.assertEqual(step.observation.shape, (43,))
+            self.assertEqual(step.decision_observation.shape, (43,))
+            self.assertTrue(step.decision_observation.flags.writeable is False)
+            if index == 0:
+                np.testing.assert_array_equal(
+                    step.decision_observation,
+                    result.initial_observation,
+                )
             self.assertEqual(step.action.shape, (7,))
             self.assertTrue(np.isfinite(step.action).all())
             self.assertEqual(step.requested_weights.keys(), step.applied_weights.keys())
@@ -199,6 +262,145 @@ class PPOAgentTests(unittest.TestCase):
             )
             actual_action, _ = loaded.predict(observation, deterministic=True)
             np.testing.assert_array_equal(expected_action, actual_action)
+
+    def test_no_time_schema_agent_manifest_load_and_mismatch_validation(self):
+        no_time_bundle = build_ppo_environments(
+            SyntheticMarketConfig(sessions=130),
+            seed=112,
+            observation_schema=OBSERVATION_SCHEMA_WITHOUT_TIME,
+        )
+        self.assertEqual(
+            no_time_bundle.train_env.observation_space.shape,
+            (42,),
+        )
+        self.assertEqual(
+            no_time_bundle.validation_env.observation_schema,
+            OBSERVATION_SCHEMA_WITHOUT_TIME,
+        )
+        model = create_ppo_agent(no_time_bundle.train_env, self.config)
+        observation, _ = no_time_bundle.validation_env.reset(seed=6)
+        self.assertEqual(model.observation_space.shape, (42,))
+        self.assertEqual(model.observation_schema, OBSERVATION_SCHEMA_WITHOUT_TIME)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            model_path, manifest_path = save_ppo_model(
+                model,
+                Path(temporary_directory) / "no_time_model",
+                config=self.config,
+                seed=17,
+                provenance=no_time_bundle.pipeline.datasets.train.metadata,
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                manifest["observation_schema"],
+                OBSERVATION_SCHEMA_WITHOUT_TIME,
+            )
+            self.assertEqual(manifest["observation_schema_version"], 1)
+            self.assertEqual(manifest["observation_shape"], [42])
+
+            loaded = load_ppo_model(model_path, env=no_time_bundle.validation_env)
+            self.assertEqual(loaded.observation_schema, OBSERVATION_SCHEMA_WITHOUT_TIME)
+            result = evaluate_ppo(loaded, no_time_bundle.validation_env, max_steps=1)
+            self.assertEqual(result.observation_schema, OBSERVATION_SCHEMA_WITHOUT_TIME)
+            with self.assertRaisesRegex(ValueError, "incompatible with environment"):
+                load_ppo_model(model_path, env=self.bundle.validation_env)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "must be run as separate configurations",
+        ):
+            build_ppo_environments(
+                SyntheticMarketConfig(sessions=130),
+                seed=112,
+                randomize_training_horizons=True,
+                observation_schema=OBSERVATION_SCHEMA_WITHOUT_TIME,
+            )
+
+    def test_schema_less_legacy_manifest_remains_43_feature_compatible(self):
+        model = create_ppo_agent(self.bundle.train_env, self.config)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            model_path, manifest_path = save_ppo_model(
+                model,
+                Path(temporary_directory) / "legacy_model",
+                config=self.config,
+                seed=17,
+                provenance=self.bundle.pipeline.datasets.train.metadata,
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                manifest["observation_schema"],
+                DEFAULT_OBSERVATION_SCHEMA,
+            )
+            manifest.pop("observation_schema")
+            manifest.pop("observation_schema_version")
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            loaded = load_ppo_model(model_path, env=self.bundle.validation_env)
+            self.assertEqual(loaded.observation_schema, DEFAULT_OBSERVATION_SCHEMA)
+
+    def test_phase72_metadata_is_saved_and_checked_with_model_manifest(self):
+        protocol = load_phase72_protocol()
+        dataset = generate_synthetic_splits(
+            SyntheticMarketConfig(),
+            seed=101,
+        ).train
+        protocol_ppo_settings = dict(
+            protocol["shared_settings"]["ppo_settings"]
+        )
+        protocol_ppo_settings.pop("seed_role")
+        protocol_ppo_settings["seed"] = 101
+        protocol_ppo_settings["net_arch"] = tuple(
+            protocol_ppo_settings["net_arch"]
+        )
+        config = PPOConfig(**protocol_ppo_settings)
+        model = create_ppo_agent(self.bundle.train_env, config)
+        run_metadata = build_phase72_run_metadata(
+            protocol,
+            configuration="A",
+            training_seed=101,
+            training_provenance=dataset.metadata,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            model_path, manifest_path = save_ppo_model(
+                model,
+                Path(temporary_directory) / "phase72_model",
+                config=config,
+                seed=101,
+                provenance=dataset.metadata,
+                experiment_metadata=run_metadata,
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["experiment_metadata"], run_metadata)
+            loaded = load_ppo_model(model_path)
+            self.assertEqual(loaded.experiment_metadata, run_metadata)
+            model_bytes = model_path.read_bytes()
+            manifest_bytes = manifest_path.read_bytes()
+            with self.assertRaisesRegex(FileExistsError, "refusing to overwrite"):
+                save_ppo_model(
+                    model,
+                    model_path,
+                    config=config,
+                    seed=101,
+                    provenance=dataset.metadata,
+                    experiment_metadata=run_metadata,
+                )
+            self.assertEqual(model_path.read_bytes(), model_bytes)
+            self.assertEqual(manifest_path.read_bytes(), manifest_bytes)
+
+            inconsistent_metadata = json.loads(json.dumps(run_metadata))
+            inconsistent_metadata["ppo_settings"]["gamma"] = 0.9
+            with self.assertRaisesRegex(ValueError, "PPO settings"):
+                save_ppo_model(
+                    model,
+                    Path(temporary_directory) / "rejected_model",
+                    config=config,
+                    seed=101,
+                    provenance=dataset.metadata,
+                    experiment_metadata=inconsistent_metadata,
+                )
+            self.assertFalse(
+                (Path(temporary_directory) / "rejected_model.zip").exists()
+            )
 
     def test_model_load_rejects_bad_manifest_and_missing_sidecar(self):
         model = create_ppo_agent(self.bundle.train_env, self.config)

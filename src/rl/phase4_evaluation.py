@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -16,11 +17,20 @@ from src.rl.benchmarks import (
 from src.rl.environment.portfolio_env import ASSET_UNIVERSE
 from src.rl.environment.synthetic_portfolio_env import (
     OBSERVATION_WARMUP_SESSIONS,
+    OBSERVATION_SCHEMA_WITH_TIME,
     SyntheticPortfolioEnv,
+    observation_size_for_schema,
 )
 from src.rl.ppo_agent import EvaluationResult, evaluate_ppo
 
 TRADING_DAYS_PER_YEAR = 252
+_ASSET_OBSERVATION_FEATURES = (
+    "return_1",
+    "return_5",
+    "return_21",
+    "volatility_21",
+    "volatility_63",
+)
 
 
 def calculate_portfolio_metrics(
@@ -46,6 +56,7 @@ def evaluate_ppo_synthetic(
     deterministic: bool = True,
     max_steps: int | None = None,
     initial_capital: float | None = None,
+    observation_diagnostics_callback: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Evaluate a PPO model and return the Phase 4 synthetic metrics."""
     base = getattr(env, "unwrapped", env)
@@ -73,6 +84,7 @@ def evaluate_ppo_synthetic(
         transaction_cost_rate=base.transaction_cost_rate,
         slippage_bps=base.slippage_bps,
         vix_level_scale=base.vix_level_scale,
+        observation_schema=base.observation_schema,
     )
     result: EvaluationResult = evaluate_ppo(
         model,
@@ -80,6 +92,13 @@ def evaluate_ppo_synthetic(
         deterministic=deterministic,
         max_steps=max_steps,
     )
+    if observation_diagnostics_callback is not None:
+        observation_diagnostics_callback(
+            build_observation_action_diagnostics(
+                result,
+                vix_level_scale=evaluation_env.vix_level_scale,
+            )
+        )
     nav_history = [
         nav
         for step in result.steps
@@ -222,6 +241,8 @@ def _validated_diagnostic_weights(
     weights: Mapping[str, float],
     expected_names: Sequence[str],
     label: str,
+    *,
+    sum_tolerance: float = 1e-8,
 ) -> dict[str, float]:
     if set(weights) != set(expected_names):
         raise ValueError(f"{label} weights do not match the environment assets")
@@ -230,10 +251,122 @@ def _validated_diagnostic_weights(
     if (
         not np.isfinite(array).all()
         or np.any(array < -1e-10)
-        or not np.isclose(float(array.sum()), 1.0, rtol=0.0, atol=1e-8)
+        or not np.isclose(
+            float(array.sum()), 1.0, rtol=0.0, atol=sum_tolerance
+        )
     ):
         raise ValueError(f"{label} weights must be finite, long-only, and sum to one")
     return values
+
+
+def build_observation_action_diagnostics(
+    result: EvaluationResult,
+    *,
+    vix_level_scale: float,
+) -> dict[str, Any]:
+    """Pair each pre-action PPO observation with its action and transition."""
+    if not math.isfinite(vix_level_scale) or vix_level_scale <= 0.0:
+        raise ValueError("vix_level_scale must be positive and finite")
+
+    weight_names = (*ASSET_UNIVERSE, "CASH")
+    observation_schema = result.observation_schema
+    observation_size = observation_size_for_schema(observation_schema)
+    has_time_remaining = observation_schema == OBSERVATION_SCHEMA_WITH_TIME
+    decisions: list[dict[str, Any]] = []
+    for decision_number, step in enumerate(result.steps, start=1):
+        if step.decision_observation is None:
+            raise ValueError("evaluation step is missing its decision observation")
+        observation = np.asarray(step.decision_observation, dtype=np.float64)
+        if observation.shape != (observation_size,) or not np.isfinite(observation).all():
+            raise ValueError(
+                f"decision observation must contain {observation_size} finite values"
+            )
+        if step.requested_weights is None or step.applied_weights is None:
+            raise ValueError("evaluation step is missing allocation diagnostics")
+
+        raw_action = np.asarray(step.action, dtype=np.float64)
+        if raw_action.shape != (len(weight_names),) or not np.isfinite(raw_action).all():
+            raise ValueError("evaluation step has an invalid raw action")
+
+        observation_index = 0
+        asset_features: dict[str, dict[str, float]] = {}
+        for symbol in ASSET_UNIVERSE:
+            asset_features[symbol] = {
+                feature_name: float(observation[observation_index + offset])
+                for offset, feature_name in enumerate(_ASSET_OBSERVATION_FEATURES)
+            }
+            observation_index += len(_ASSET_OBSERVATION_FEATURES)
+
+        benchmark_features = {
+            "return_1": float(observation[observation_index]),
+            "volatility_21": float(observation[observation_index + 1]),
+        }
+        vix_input = float(observation[observation_index + 2])
+        state_start = observation_index + 3
+        current_weights = {
+            name: float(observation[state_start + index])
+            for index, name in enumerate(weight_names)
+        }
+        current_weights = _validated_diagnostic_weights(
+            current_weights,
+            weight_names,
+            "observed current portfolio",
+            sum_tolerance=1e-6,
+        )
+        nav_ratio = float(observation[state_start + len(weight_names)])
+        drawdown = float(observation[state_start + len(weight_names) + 1])
+        observation_features = {
+            "asset_features": asset_features,
+            "benchmark_features": benchmark_features,
+            "vix_level": vix_input * vix_level_scale,
+            "vix_model_input": vix_input,
+            "vix_level_scale": float(vix_level_scale),
+            "current_asset_weights": {
+                symbol: current_weights[symbol] for symbol in ASSET_UNIVERSE
+            },
+            "cash_weight": current_weights["CASH"],
+            "current_portfolio_weights": current_weights,
+            "portfolio_value_ratio": nav_ratio,
+            "drawdown": drawdown,
+        }
+        if has_time_remaining:
+            time_remaining = float(observation[state_start + len(weight_names) + 2])
+            if not 0.0 <= time_remaining <= 1.0:
+                raise ValueError("decision observation contains invalid time feature")
+            observation_features["time_remaining_fraction"] = time_remaining
+        if (
+            nav_ratio <= 0.0
+            or vix_input <= 0.0
+        ):
+            raise ValueError("decision observation contains invalid state features")
+
+        decisions.append({
+            "decision_number": decision_number,
+            "raw_observation": [float(value) for value in observation],
+            "observation_features": observation_features,
+            "raw_action": [float(value) for value in raw_action],
+            "requested_target_weights": _validated_diagnostic_weights(
+                step.requested_weights, weight_names, "requested target"
+            ),
+            "applied_portfolio_weights": _validated_diagnostic_weights(
+                step.applied_weights, weight_names, "applied portfolio"
+            ),
+            "portfolio_nav_after_interval": float(step.nav),
+            "reward": float(step.reward),
+        })
+
+    return {
+        "format": "ppo-observation-action-diagnostics-v1",
+        "source_type": result.source_type,
+        "synthetic": result.synthetic,
+        "scenario_id": result.scenario_id,
+        "seed": result.seed,
+        "observation_schema": observation_schema,
+        "observation_size": observation_size,
+        "action_size": len(weight_names),
+        "decision_count": len(decisions),
+        "decisions": decisions,
+    }
 
 
 def evaluate_phase4(
@@ -241,6 +374,7 @@ def evaluate_phase4(
     env: Any,
     *,
     initial_capital: float | None = None,
+    observation_diagnostics_callback: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Compare synthetic PPO against the four existing benchmark strategies."""
     base = getattr(env, "unwrapped", env)
@@ -255,7 +389,12 @@ def evaluate_phase4(
     capital = float(base.initial_capital if initial_capital is None else initial_capital)
     if capital <= 0 or not np.isfinite(capital):
         raise ValueError("initial_capital must be positive and finite")
-    ppo = evaluate_ppo_synthetic(model, env, initial_capital=capital)
+    ppo = evaluate_ppo_synthetic(
+        model,
+        env,
+        initial_capital=capital,
+        observation_diagnostics_callback=observation_diagnostics_callback,
+    )
     benchmark_frame = evaluate_synthetic_benchmarks(
         base.asset_returns,
         initial_capital=capital,
@@ -339,6 +478,25 @@ def save_phase4_diagnostics(
     return path
 
 
+def save_phase4_observation_action_diagnostics(
+    output_dir: str | Path,
+    diagnostics: Mapping[str, Any],
+) -> Path:
+    """Save observation/action traces without changing existing PPO artifacts."""
+    decisions = diagnostics.get("decisions")
+    if (
+        not isinstance(decisions, list)
+        or diagnostics.get("decision_count") != len(decisions)
+    ):
+        raise ValueError("diagnostics decision_count must match its decisions")
+    directory = Path(output_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "ppo_observation_action_diagnostics.json"
+    path.write_text(
+        json.dumps(diagnostics, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    return path
 def save_phase4_csv(output_dir: str | Path, evaluation: Mapping[str, Any]) -> Path:
     """Save one row per PPO/benchmark strategy as CSV."""
     directory = Path(output_dir)

@@ -19,11 +19,22 @@ from typing import Any, Mapping
 import gymnasium as gym
 import numpy as np
 
-from src.rl.environment.synthetic_portfolio_env import OBSERVATION_SIZE
+from src.rl.environment.synthetic_portfolio_env import (
+    DEFAULT_OBSERVATION_SCHEMA,
+    OBSERVATION_SCHEMA_VERSION,
+    OBSERVATION_SCHEMA_WITH_TIME,
+    OBSERVATION_SCHEMA_WITHOUT_TIME,
+    observation_size_for_schema,
+)
 from src.rl.environment.portfolio_env import ASSET_UNIVERSE
 from src.rl.ppo_config import PPOConfig, TrainingOptions
+from src.rl.phase7_experiment import validate_experiment_manifest_metadata
 from src.rl.synthetic_data import GENERATOR_VERSION, SyntheticMarketConfig
-from src.rl.synthetic_pipeline import SyntheticPipeline, build_synthetic_pipeline
+from src.rl.synthetic_pipeline import (
+    RandomizedEpisodeHorizonEnv,
+    SyntheticPipeline,
+    build_synthetic_pipeline,
+)
 
 MODEL_MANIFEST_VERSION = "1.0"
 _PROVENANCE_KEYS = (
@@ -65,6 +76,7 @@ class EvaluationStep:
     daily_navs: tuple[float, ...] = ()
     requested_weights: dict[str, float] | None = None
     applied_weights: dict[str, float] | None = None
+    decision_observation: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +89,7 @@ class EvaluationResult:
     seed: int
     initial_observation: np.ndarray
     steps: tuple[EvaluationStep, ...]
+    observation_schema: str = DEFAULT_OBSERVATION_SCHEMA
 
 
 @dataclass(frozen=True)
@@ -91,11 +104,39 @@ def build_ppo_environments(
     config: SyntheticMarketConfig | None = None,
     *,
     seed: int,
+    randomize_training_horizons: bool = False,
+    min_episode_decisions: int = 11,
+    max_episode_decisions: int | None = None,
+    horizon_seed: int | None = None,
+    observation_schema: str = DEFAULT_OBSERVATION_SCHEMA,
 ) -> PPOEnvironmentBundle:
-    """Create a monitored training env and separate untouched eval envs."""
-    pipeline = build_synthetic_pipeline(config, seed=seed)
+    """Create isolated environments, optionally randomizing training horizons."""
+    if not isinstance(randomize_training_horizons, bool):
+        raise ValueError("randomize_training_horizons must be a boolean")
+    observation_size_for_schema(observation_schema)
+    if (
+        randomize_training_horizons
+        and observation_schema != OBSERVATION_SCHEMA_WITH_TIME
+    ):
+        raise ValueError(
+            "randomized training horizons and the no-time observation schema "
+            "must be run as separate configurations"
+        )
+    pipeline = build_synthetic_pipeline(
+        config,
+        seed=seed,
+        observation_schema=observation_schema,
+    )
+    training_environment = pipeline.environments["train"]
+    if randomize_training_horizons:
+        training_environment = RandomizedEpisodeHorizonEnv(
+            training_environment,
+            min_episode_decisions=min_episode_decisions,
+            max_episode_decisions=max_episode_decisions,
+            seed=seed if horizon_seed is None else horizon_seed,
+        )
     monitor_type = _monitor_type()
-    train_env = monitor_type(pipeline.environments["train"])
+    train_env = monitor_type(training_environment)
     return PPOEnvironmentBundle(
         pipeline=pipeline,
         train_env=train_env,
@@ -115,7 +156,7 @@ def create_ppo_agent(
     """Initialize an SB3 PPO model after checking environment dimensions."""
     selected_config = config or PPOConfig()
     selected_config.validate()
-    _validate_environment(env)
+    observation_schema = _validate_environment(env)
     effective_seed = selected_config.seed if seed is None else _validate_seed(seed)
     if isinstance(verbose, bool) or not isinstance(verbose, int) or verbose not in (0, 1, 2):
         raise ValueError("verbose must be 0, 1, or 2")
@@ -123,7 +164,9 @@ def create_ppo_agent(
         selected_config, effective_seed, tensorboard_log, verbose
     )
     ppo_type = _ppo_type()
-    return ppo_type("MlpPolicy", env, **kwargs)
+    model = ppo_type("MlpPolicy", env, **kwargs)
+    model.observation_schema = observation_schema
+    return model
 
 
 def train_ppo(
@@ -158,7 +201,7 @@ def train_ppo(
         verbose=verbose,
     )
     options.validate()
-    _validate_environment(env)
+    observation_schema = _validate_environment(env)
     effective_seed = selected_config.seed if seed is None else _validate_seed(seed)
     model = create_ppo_agent(
         env,
@@ -194,6 +237,8 @@ def train_ppo(
                 "scenario_id"
             ],
             "training_scenario_seed": _base_environment(env).data_metadata["seed"],
+            "observation_schema": observation_schema,
+            "observation_schema_version": OBSERVATION_SCHEMA_VERSION,
             "total_timesteps": options.total_timesteps,
             "ppo_config": asdict(selected_config),
             "training_options": asdict(options),
@@ -216,7 +261,21 @@ def evaluate_ppo(
         isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps <= 0
     ):
         raise ValueError("max_steps must be a positive integer when supplied")
-    _validate_environment(env)
+    observation_schema = _validate_environment(env)
+    model_schema = getattr(model, "observation_schema", None)
+    if model_schema is None:
+        model_shape = getattr(
+            getattr(model, "observation_space", None), "shape", None
+        )
+        if model_shape == (43,):
+            model_schema = DEFAULT_OBSERVATION_SCHEMA
+        elif model_shape == (42,):
+            model_schema = OBSERVATION_SCHEMA_WITHOUT_TIME
+    if model_schema is not None and model_schema != observation_schema:
+        raise ValueError(
+            f"PPO model observation schema {model_schema!r} is incompatible "
+            f"with environment schema {observation_schema!r}"
+        )
     base_env = _base_environment(env)
     metadata = base_env.data_metadata
     if metadata.get("synthetic") is not True or metadata.get("source_type") != "synthetic":
@@ -227,6 +286,10 @@ def evaluate_ppo(
     initial_observation.setflags(write=False)
     steps: list[EvaluationStep] = []
     while max_steps is None or len(steps) < max_steps:
+        decision_observation_copy = np.array(
+            observation, dtype=np.float32, copy=True
+        )
+        decision_observation_copy.setflags(write=False)
         action, _ = model.predict(observation, deterministic=True)
         action_array = np.asarray(action, dtype=np.float32)
         if action_array.shape == (1, env.action_space.shape[0]):
@@ -258,6 +321,7 @@ def evaluate_ppo(
                 terminated=terminated,
                 truncated=truncated,
                 daily_navs=daily_navs,
+                decision_observation=decision_observation_copy,
             )
         )
         observation = next_observation
@@ -270,6 +334,7 @@ def evaluate_ppo(
         seed=int(metadata["seed"]),
         initial_observation=initial_observation,
         steps=tuple(steps),
+        observation_schema=observation_schema,
     )
 
 
@@ -280,13 +345,43 @@ def save_ppo_model(
     config: PPOConfig,
     seed: int,
     provenance: Mapping[str, object],
+    experiment_metadata: Mapping[str, object] | None = None,
 ) -> tuple[Path, Path]:
     """Save model and synthetic-only JSON manifest with a model checksum."""
     config.validate()
     normalized_seed = _validate_seed(seed)
     _validate_synthetic_provenance(provenance)
-    _validate_model_dimensions(model)
+    observation_schema = _validate_model_dimensions(model)
+    if experiment_metadata is not None:
+        selected_provenance = {
+            key: _json_compatible(provenance[key])
+            for key in _PROVENANCE_KEYS
+            if key in provenance
+        }
+        validate_experiment_manifest_metadata(
+            experiment_metadata,
+            seed=normalized_seed,
+            observation_schema=observation_schema,
+            ppo_settings=asdict(config),
+            manifest_provenance=selected_provenance,
+        )
     model_path, manifest_path = _model_paths(path)
+    if experiment_metadata is not None:
+        protected_model_dir = (
+            Path(__file__).resolve().parents[2] / ".artifacts" / "ppo"
+        ).resolve()
+        resolved_model_path = model_path.resolve()
+        if (
+            resolved_model_path == protected_model_dir
+            or protected_model_dir in resolved_model_path.parents
+        ):
+            raise ValueError(
+                "Phase 7.2 model saves may never use the existing .artifacts/ppo directory"
+            )
+        if model_path.exists() or manifest_path.exists():
+            raise FileExistsError(
+                "refusing to overwrite an existing Phase 7.2 model or manifest"
+            )
     model_path.parent.mkdir(parents=True, exist_ok=True)
     model.save(str(model_path))
     if not model_path.is_file():
@@ -296,6 +391,8 @@ def save_ppo_model(
         config=config,
         seed=normalized_seed,
         provenance=provenance,
+        observation_schema=observation_schema,
+        experiment_metadata=experiment_metadata,
     )
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -322,12 +419,24 @@ def load_ppo_model(
         raise ValueError(f"PPO model manifest is unreadable: {manifest_path}") from error
     if not isinstance(manifest, dict):
         raise ValueError("PPO model manifest must be a JSON object")
-    _validate_manifest(manifest, model_path, expected_config)
+    observation_schema = _validate_manifest(
+        manifest, model_path, expected_config
+    )
     if env is not None:
-        _validate_environment(env)
+        environment_schema = _validate_environment(env)
+        if environment_schema != observation_schema:
+            raise ValueError(
+                f"PPO model observation schema {observation_schema!r} is "
+                f"incompatible with environment schema {environment_schema!r}"
+            )
     model_type = _ppo_type()
     model = model_type.load(str(model_path), env=env)
-    _validate_model_dimensions(model)
+    model_schema = _validate_model_dimensions(model)
+    if model_schema != observation_schema:
+        raise ValueError("PPO model dimensions do not match its manifest schema")
+    model.observation_schema = observation_schema
+    if "experiment_metadata" in manifest:
+        model.experiment_metadata = manifest["experiment_metadata"]
     return model
 
 
@@ -337,6 +446,8 @@ def _build_manifest(
     config: PPOConfig,
     seed: int,
     provenance: Mapping[str, object],
+    observation_schema: str,
+    experiment_metadata: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     try:
         import stable_baselines3
@@ -350,13 +461,15 @@ def _build_manifest(
         for key in _PROVENANCE_KEYS
         if key in provenance
     }
-    return {
+    manifest = {
         "manifest_version": MODEL_MANIFEST_VERSION,
         "source_type": "synthetic",
         "synthetic": True,
         "seed": seed,
         "asset_order": list(ASSET_UNIVERSE),
-        "observation_shape": [OBSERVATION_SIZE],
+        "observation_schema": observation_schema,
+        "observation_schema_version": OBSERVATION_SCHEMA_VERSION,
+        "observation_shape": [observation_size_for_schema(observation_schema)],
         "action_shape": [len(ASSET_UNIVERSE) + 1],
         "generator_version": str(
             provenance.get("generator_version", GENERATOR_VERSION)
@@ -373,20 +486,47 @@ def _build_manifest(
         "model_sha256": _sha256_file(model_path),
         "saved_at_utc": datetime.now(timezone.utc).isoformat(),
     }
+    if experiment_metadata is not None:
+        manifest["experiment_metadata"] = _json_compatible(
+            dict(experiment_metadata)
+        )
+    return manifest
 
 
 def _validate_manifest(
     manifest: Mapping[str, object],
     model_path: Path,
     expected_config: PPOConfig | None,
-) -> None:
+) -> str:
     if manifest.get("manifest_version") != MODEL_MANIFEST_VERSION:
         raise ValueError("unsupported PPO model manifest version")
     if manifest.get("source_type") != "synthetic" or manifest.get("synthetic") is not True:
         raise ValueError("model artifact is not marked synthetic-only")
     if manifest.get("asset_order") != list(ASSET_UNIVERSE):
         raise ValueError("model manifest asset order is incompatible")
-    if manifest.get("observation_shape") != [OBSERVATION_SIZE]:
+    observation_shape = manifest.get("observation_shape")
+    observation_schema = manifest.get("observation_schema")
+    schema_version = manifest.get("observation_schema_version")
+    if observation_schema is None:
+        if schema_version is not None or observation_shape != [43]:
+            raise ValueError(
+                "legacy model manifest is compatible only with the 43-feature schema"
+            )
+        observation_schema = DEFAULT_OBSERVATION_SCHEMA
+    else:
+        if schema_version != OBSERVATION_SCHEMA_VERSION:
+            raise ValueError("unsupported model observation schema version")
+        try:
+            expected_observation_shape = [
+                observation_size_for_schema(str(observation_schema))
+            ]
+        except ValueError as error:
+            raise ValueError("model manifest observation schema is incompatible") from error
+        if observation_shape != expected_observation_shape:
+            raise ValueError(
+                "model manifest observation shape does not match its schema"
+            )
+    if observation_shape != [observation_size_for_schema(str(observation_schema))]:
         raise ValueError("model manifest observation shape is incompatible")
     if manifest.get("action_shape") != [len(ASSET_UNIVERSE) + 1]:
         raise ValueError("model manifest action shape is incompatible")
@@ -406,6 +546,16 @@ def _validate_manifest(
         expected_config.validate()
         if stored_config != _json_compatible(asdict(expected_config)):
             raise ValueError("PPO model configuration does not match expected_config")
+    experiment_metadata = manifest.get("experiment_metadata")
+    if experiment_metadata is not None:
+        validate_experiment_manifest_metadata(
+            experiment_metadata,
+            seed=int(manifest["seed"]),
+            observation_schema=str(observation_schema),
+            ppo_settings=stored_config,
+            manifest_provenance=provenance,
+        )
+    return str(observation_schema)
 
 
 def _validate_synthetic_provenance(
@@ -454,37 +604,66 @@ def _model_paths(path: str | os.PathLike[str]) -> tuple[Path, Path]:
     return model_path, model_path.with_suffix(".manifest.json")
 
 
-def _validate_environment(env: gym.Env) -> None:
+def _validate_environment(env: gym.Env) -> str:
     if not isinstance(env, gym.Env):
         raise TypeError("env must be a Gymnasium environment")
     observation_shape = getattr(env.observation_space, "shape", None)
     action_shape = getattr(env.action_space, "shape", None)
-    if observation_shape != (OBSERVATION_SIZE,):
-        raise ValueError("environment must expose a 43-dimensional observation space")
     if not isinstance(env.action_space, gym.spaces.Box):
         raise ValueError("environment must expose a continuous Box action space")
     if action_shape != (len(ASSET_UNIVERSE) + 1,):
         raise ValueError("environment must expose a seven-dimensional action space")
     base_env = _base_environment(env)
+    observation_schema = getattr(base_env, "observation_schema", None)
+    if observation_schema is None:
+        if observation_shape == (43,):
+            observation_schema = DEFAULT_OBSERVATION_SCHEMA
+        else:
+            raise ValueError(
+                "environment must declare a supported synthetic observation schema"
+            )
+    try:
+        expected_shape = (observation_size_for_schema(observation_schema),)
+    except ValueError as error:
+        raise ValueError("environment observation schema is unsupported") from error
+    if observation_shape != expected_shape:
+        raise ValueError(
+            f"environment schema {observation_schema!r} requires observation "
+            f"shape {expected_shape}, got {observation_shape}"
+        )
     if (
         getattr(base_env, "metadata", {}).get("synthetic") is not True
         or getattr(base_env, "data_metadata", {}).get("synthetic") is not True
         or getattr(base_env, "data_metadata", {}).get("source_type") != "synthetic"
     ):
         raise ValueError("PPO environment must use synthetic data")
+    return observation_schema
 
 
-def _validate_model_dimensions(model: Any) -> None:
-    if getattr(getattr(model, "observation_space", None), "shape", None) != (
-        OBSERVATION_SIZE,
-    ):
-        raise ValueError("PPO model must have a 43-dimensional observation space")
+def _validate_model_dimensions(model: Any) -> str:
+    observation_shape = getattr(
+        getattr(model, "observation_space", None), "shape", None
+    )
+    if observation_shape == (43,):
+        inferred_schema = DEFAULT_OBSERVATION_SCHEMA
+    elif observation_shape == (42,):
+        inferred_schema = OBSERVATION_SCHEMA_WITHOUT_TIME
+    else:
+        raise ValueError(
+            "PPO model must have a 43-feature or 42-feature observation space"
+        )
+    observation_schema = getattr(model, "observation_schema", inferred_schema)
+    if observation_schema != inferred_schema:
+        raise ValueError(
+            "PPO model observation schema does not match its observation dimensions"
+        )
     if getattr(getattr(model, "action_space", None), "shape", None) != (
         len(ASSET_UNIVERSE) + 1,
     ):
         raise ValueError("PPO model must have a seven-dimensional action space")
     if not isinstance(getattr(model, "action_space", None), gym.spaces.Box):
         raise ValueError("PPO model must use a continuous Box action space")
+    return observation_schema
 
 
 def _base_environment(env: gym.Env) -> Any:

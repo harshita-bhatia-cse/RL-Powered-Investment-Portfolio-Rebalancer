@@ -13,7 +13,12 @@ from gymnasium import spaces
 
 from .portfolio_env import ASSET_UNIVERSE, project_to_simplex
 
+OBSERVATION_SCHEMA_VERSION = 1
+OBSERVATION_SCHEMA_WITH_TIME = "synthetic_portfolio_v1_with_time"
+OBSERVATION_SCHEMA_WITHOUT_TIME = "synthetic_portfolio_v1_without_time"
+DEFAULT_OBSERVATION_SCHEMA = OBSERVATION_SCHEMA_WITH_TIME
 OBSERVATION_SIZE = 43
+OBSERVATION_SIZE_WITHOUT_TIME = 42
 TRADING_DAYS_PER_YEAR = 252
 OBSERVATION_WARMUP_SESSIONS = 63
 DEFAULT_INITIAL_CAPITAL = 100_000.0
@@ -23,6 +28,14 @@ DEFAULT_MIN_CASH_WEIGHT = 0.02
 DEFAULT_MAX_TURNOVER = 1.0
 DEFAULT_TRANSACTION_COST_RATE = 0.001
 DEFAULT_SLIPPAGE_BPS = 5.0
+
+
+def observation_size_for_schema(observation_schema: str) -> int:
+    if observation_schema == OBSERVATION_SCHEMA_WITH_TIME:
+        return OBSERVATION_SIZE
+    if observation_schema == OBSERVATION_SCHEMA_WITHOUT_TIME:
+        return OBSERVATION_SIZE_WITHOUT_TIME
+    raise ValueError(f"unsupported synthetic observation schema: {observation_schema!r}")
 
 
 class SyntheticPortfolioEnv(gym.Env[np.ndarray, np.ndarray]):
@@ -65,6 +78,7 @@ class SyntheticPortfolioEnv(gym.Env[np.ndarray, np.ndarray]):
         transaction_cost_rate: float = DEFAULT_TRANSACTION_COST_RATE,
         slippage_bps: float = DEFAULT_SLIPPAGE_BPS,
         vix_level_scale: float = 100.0,
+        observation_schema: str = DEFAULT_OBSERVATION_SCHEMA,
         render_mode: str | None = None,
     ) -> None:
         super().__init__()
@@ -107,6 +121,8 @@ class SyntheticPortfolioEnv(gym.Env[np.ndarray, np.ndarray]):
         )
         self.slippage_bps = _finite_nonnegative("slippage_bps", slippage_bps)
         self.vix_level_scale = _finite_positive("vix_level_scale", vix_level_scale)
+        self.observation_size = observation_size_for_schema(observation_schema)
+        self.observation_schema = observation_schema
         if self.min_cash_weight > 1.0:
             raise ValueError("minimum cash reserve cannot exceed 100%")
         if self.max_turnover > 2.0:
@@ -127,7 +143,7 @@ class SyntheticPortfolioEnv(gym.Env[np.ndarray, np.ndarray]):
         self.observation_space = spaces.Box(
             low=-observation_limit,
             high=observation_limit,
-            shape=(OBSERVATION_SIZE,),
+            shape=(self.observation_size,),
             dtype=np.float32,
         )
 
@@ -317,8 +333,9 @@ class SyntheticPortfolioEnv(gym.Env[np.ndarray, np.ndarray]):
             *self._weights.tolist(),
             self._nav / self.initial_capital,
             drawdown,
-            sessions_remaining / episode_sessions,
         ]
+        if self.observation_schema == OBSERVATION_SCHEMA_WITH_TIME:
+            state_features.append(sessions_remaining / episode_sessions)
         observation = np.asarray(
             [
                 *asset_features,
@@ -328,7 +345,10 @@ class SyntheticPortfolioEnv(gym.Env[np.ndarray, np.ndarray]):
             ],
             dtype=np.float32,
         )
-        if observation.shape != (OBSERVATION_SIZE,) or not np.isfinite(observation).all():
+        if (
+            observation.shape != (self.observation_size,)
+            or not np.isfinite(observation).all()
+        ):
             raise RuntimeError("environment produced an invalid observation")
         return observation
 

@@ -1,0 +1,133 @@
+{
+  "protocol_id": "phase7_2_synthetic_ppo_comparison",
+  "protocol_version": 1,
+  "seed_roles": {
+    "training_seeds": [101, 202, 303, 404, 505],
+    "validation_scenario_roots": [
+      7201, 7202, 7203, 7204, 7205,
+      7206, 7207, 7208, 7209, 7210,
+      7211, 7212, 7213, 7214, 7215,
+      7216, 7217, 7218, 7219, 7220
+    ],
+    "reserved_test_scenario_roots": [
+      9201, 9202, 9203, 9204, 9205,
+      9206, 9207, 9208, 9209, 9210,
+      9211, 9212, 9213, 9214, 9215,
+      9216, 9217, 9218, 9219, 9220
+    ]
+  },
+  "shared_settings": {
+    "observation_schema_version": 1,
+    "ppo_settings": {
+      "n_steps": 1024,
+      "batch_size": 256,
+      "gamma": 0.99,
+      "gae_lambda": 0.95,
+      "learning_rate": 0.0003,
+      "clip_range": 0.2,
+      "ent_coef": 0.0,
+      "vf_coef": 0.5,
+      "max_grad_norm": 0.5,
+      "net_arch": [128, 128],
+      "device": "cpu",
+      "seed_role": "training_seed"
+    },
+    "training_budget": {
+      "requested_total_timesteps": 10000
+    },
+    "synthetic_generator": {
+      "generator_version": "1.0",
+      "sessions": 756,
+      "correlation_matrix": [
+        [1.0, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25],
+        [0.25, 1.0, 0.25, 0.25, 0.25, 0.25, 0.25],
+        [0.25, 0.25, 1.0, 0.25, 0.25, 0.25, 0.25],
+        [0.25, 0.25, 0.25, 1.0, 0.25, 0.25, 0.25],
+        [0.25, 0.25, 0.25, 0.25, 1.0, 0.25, 0.25],
+        [0.25, 0.25, 0.25, 0.25, 0.25, 1.0, 0.25],
+        [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 1.0]
+      ],
+      "regimes": [
+        {
+          "name": "bull",
+          "annualized_log_returns": [0.12, 0.16, 0.025, 0.04, 0.07, 0.08, 0.1],
+          "annualized_volatilities": [0.18, 0.27, 0.07, 0.18, 0.16, 0.15, 0.17],
+          "vix_long_run_level": 16.0,
+          "vix_annualized_log_volatility": 0.35
+        },
+        {
+          "name": "bear",
+          "annualized_log_returns": [-0.18, -0.25, 0.04, -0.08, -0.1, -0.08, -0.2],
+          "annualized_volatilities": [0.35, 0.48, 0.12, 0.32, 0.28, 0.25, 0.32],
+          "vix_long_run_level": 38.0,
+          "vix_annualized_log_volatility": 0.55
+        },
+        {
+          "name": "sideways",
+          "annualized_log_returns": [0.04, 0.05, 0.025, 0.02, 0.04, 0.05, 0.04],
+          "annualized_volatilities": [0.16, 0.23, 0.06, 0.15, 0.14, 0.13, 0.15],
+          "vix_long_run_level": 21.0,
+          "vix_annualized_log_volatility": 0.3
+        }
+      ],
+      "transition_matrix": [
+        [0.94, 0.02, 0.04],
+        [0.04, 0.92, 0.04],
+        [0.08, 0.08, 0.84]
+      ],
+      "initial_regime_probabilities": [0.5, 0.2, 0.3],
+      "initial_vix_level": 20.0,
+      "vix_mean_reversion_speed": 0.08,
+      "vix_min_level": 5.0,
+      "vix_max_level": 100.0,
+      "vix_log_level_clip": 5.0
+    },
+    "environment": {
+      "warmup_sessions": 63,
+      "period_sessions": 21,
+      "initial_capital": 100000.0,
+      "max_asset_weight": 0.35,
+      "min_cash_weight": 0.02,
+      "max_turnover": 1.0,
+      "transaction_cost_rate": 0.001,
+      "slippage_bps": 5.0,
+      "vix_level_scale": 100.0
+    },
+    "evaluation": {
+      "deterministic": true,
+      "evaluation_sessions": 693,
+      "rebalance_decisions": 33,
+      "validation_scenario_count": 20,
+      "reserved_test_scenario_count": 20,
+      "benchmark_inputs": "same synthetic scenario returns, capital, costs, and period as PPO"
+    }
+  },
+  "configurations": {
+    "A": {
+      "observation_schema": "synthetic_portfolio_v1_with_time",
+      "randomize_training_horizons": false,
+      "horizon_settings": null
+    },
+    "B": {
+      "observation_schema": "synthetic_portfolio_v1_with_time",
+      "randomize_training_horizons": true,
+      "horizon_settings": {
+        "sampling": "uniform_integer_decisions_inclusive",
+        "minimum_decisions": 11,
+        "maximum_decisions": 33,
+        "sampler_seed_by_training_seed": {
+          "101": 101,
+          "202": 202,
+          "303": 303,
+          "404": 404,
+          "505": 505
+        }
+      }
+    },
+    "C": {
+      "observation_schema": "synthetic_portfolio_v1_without_time",
+      "randomize_training_horizons": false,
+      "horizon_settings": null
+    }
+  }
+}

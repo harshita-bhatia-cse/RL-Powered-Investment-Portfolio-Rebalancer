@@ -5,8 +5,11 @@ import numpy as np
 from gymnasium.utils.env_checker import check_env
 
 from src.rl.environment.synthetic_portfolio_env import (
+    DEFAULT_OBSERVATION_SCHEMA,
     DEFAULT_INITIAL_CAPITAL,
     OBSERVATION_SIZE,
+    OBSERVATION_SIZE_WITHOUT_TIME,
+    OBSERVATION_SCHEMA_WITHOUT_TIME,
     OBSERVATION_WARMUP_SESSIONS,
 )
 from src.rl.environment import SyntheticPortfolioEnv
@@ -79,6 +82,40 @@ class SyntheticPortfolioEnvTests(unittest.TestCase):
         self.assertAlmostEqual(float(observation[1]), (1.01**5) - 1.0, places=6)
         self.assertAlmostEqual(float(observation[30]), 0.02, places=7)
         self.assertAlmostEqual(float(observation[32]), 0.25, places=7)
+
+    def test_no_time_schema_preserves_all_other_observation_features(self):
+        assets, benchmark, vix = make_market_data()
+        assets[-63:, 0] = 0.01
+        benchmark[-63:] = 0.02
+        vix[OBSERVATION_WARMUP_SESSIONS - 1] = 25.0
+        with_time = SyntheticPortfolioEnv(
+            assets,
+            benchmark,
+            vix,
+            data_metadata={"source_type": "synthetic", "synthetic": True},
+            observation_schema=DEFAULT_OBSERVATION_SCHEMA,
+        )
+        without_time = SyntheticPortfolioEnv(
+            assets,
+            benchmark,
+            vix,
+            data_metadata={"source_type": "synthetic", "synthetic": True},
+            observation_schema=OBSERVATION_SCHEMA_WITHOUT_TIME,
+        )
+
+        with_time_observation, _ = with_time.reset(seed=5)
+        without_time_observation, _ = without_time.reset(seed=5)
+
+        self.assertEqual(with_time.observation_space.shape, (OBSERVATION_SIZE,))
+        self.assertEqual(
+            without_time.observation_space.shape,
+            (OBSERVATION_SIZE_WITHOUT_TIME,),
+        )
+        self.assertEqual(without_time.observation_schema, OBSERVATION_SCHEMA_WITHOUT_TIME)
+        np.testing.assert_array_equal(
+            without_time_observation,
+            with_time_observation[:-1],
+        )
 
     def test_action_is_projected_and_constraints_are_enforced(self):
         env = make_env()

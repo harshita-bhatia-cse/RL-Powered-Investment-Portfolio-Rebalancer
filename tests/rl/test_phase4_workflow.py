@@ -9,6 +9,8 @@ import gymnasium as gym
 from src.rl.phase4_evaluation import (
     calculate_portfolio_metrics,
     evaluate_phase4,
+    evaluate_ppo_synthetic,
+    save_phase4_observation_action_diagnostics,
     save_phase4_diagnostics,
     save_phase4_csv,
     save_phase4_results,
@@ -25,6 +27,11 @@ from src.rl.synthetic_data import SyntheticMarketConfig
 from src.rl.ppo_agent import build_ppo_environments
 from src.rl.benchmarks import evaluate_synthetic_benchmarks
 from src.rl.environment.portfolio_env import ASSET_UNIVERSE
+from src.rl.environment.synthetic_portfolio_env import (
+    OBSERVATION_SCHEMA_WITHOUT_TIME,
+    SyntheticPortfolioEnv,
+)
+from src.rl.synthetic_data import generate_synthetic_market
 
 
 def make_evaluation_step(
@@ -240,6 +247,159 @@ class Phase4WorkflowTests(unittest.TestCase):
             self.assertEqual(saved["scenario_id"], "validation-example")
             self.assertEqual(saved["summary"], diagnostics["summary"])
 
+    def test_observation_action_diagnostics_align_33_decisions_and_save_separately(self):
+        dataset = generate_synthetic_market(
+            SyntheticMarketConfig(sessions=756),
+            seed=203,
+            scenario_id="validation-observation-trace",
+        )
+        env = SyntheticPortfolioEnv(**dataset.environment_kwargs())
+
+        class RecordingModel:
+            def __init__(self):
+                self.observations = []
+                self.actions = []
+
+            def predict(self, observation, deterministic=True):
+                observation_copy = np.array(observation, dtype=np.float32, copy=True)
+                action = np.full(7, -0.5, dtype=np.float32)
+                action[len(self.actions) % 7] = 0.5
+                self.observations.append(observation_copy)
+                self.actions.append(action.copy())
+                return action, None
+
+        model = RecordingModel()
+        captured = {}
+        evaluation = evaluate_ppo_synthetic(
+            model,
+            env,
+            observation_diagnostics_callback=captured.update,
+        )
+
+        self.assertEqual(evaluation["steps"], 33)
+        self.assertEqual(captured["decision_count"], 33)
+        self.assertEqual(len(captured["decisions"]), 33)
+        self.assertEqual(captured["observation_size"], 43)
+        self.assertEqual(captured["action_size"], 7)
+        for index, decision in enumerate(captured["decisions"]):
+            self.assertEqual(decision["decision_number"], index + 1)
+            np.testing.assert_array_equal(
+                decision["raw_observation"],
+                model.observations[index],
+            )
+            np.testing.assert_array_equal(
+                decision["raw_action"],
+                model.actions[index],
+            )
+            self.assertEqual(
+                set(decision["requested_target_weights"]),
+                set((*ASSET_UNIVERSE, "CASH")),
+            )
+            self.assertEqual(
+                set(decision["applied_portfolio_weights"]),
+                set((*ASSET_UNIVERSE, "CASH")),
+            )
+
+        features = captured["decisions"][0]["observation_features"]
+        first_observation = model.observations[0]
+        self.assertAlmostEqual(
+            features["asset_features"]["SPY"]["return_1"],
+            float(first_observation[0]),
+        )
+        self.assertAlmostEqual(
+            features["asset_features"]["XLV"]["volatility_63"],
+            float(first_observation[29]),
+        )
+        self.assertAlmostEqual(
+            features["benchmark_features"]["return_1"],
+            float(first_observation[30]),
+        )
+        self.assertAlmostEqual(
+            features["benchmark_features"]["volatility_21"],
+            float(first_observation[31]),
+        )
+        self.assertAlmostEqual(
+            features["vix_model_input"],
+            float(first_observation[32]),
+        )
+        self.assertAlmostEqual(
+            features["cash_weight"],
+            float(first_observation[39]),
+        )
+        self.assertAlmostEqual(
+            features["drawdown"],
+            float(first_observation[41]),
+        )
+        self.assertAlmostEqual(
+            features["time_remaining_fraction"],
+            float(first_observation[42]),
+        )
+        json_payload = json.dumps(captured, allow_nan=False)
+        self.assertEqual(json.loads(json_payload)["decision_count"], 33)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory)
+            baseline_files = {
+                "evaluation.json": '{"baseline":"evaluation"}',
+                "ppo_diagnostics.json": '{"baseline":"allocation"}',
+            }
+            for name, contents in baseline_files.items():
+                (output / name).write_text(contents, encoding="utf-8")
+
+            diagnostics_path = save_phase4_observation_action_diagnostics(
+                output, captured
+            )
+
+            self.assertEqual(
+                diagnostics_path.name,
+                "ppo_observation_action_diagnostics.json",
+            )
+            loaded = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+            self.assertEqual(loaded["decision_count"], 33)
+            self.assertEqual(len(loaded["decisions"]), 33)
+            for name, contents in baseline_files.items():
+                self.assertEqual(
+                    (output / name).read_text(encoding="utf-8"),
+                    contents,
+                )
+
+    def test_no_time_observation_diagnostics_omit_time_feature(self):
+        dataset = generate_synthetic_market(
+            SyntheticMarketConfig(sessions=84),
+            seed=204,
+            scenario_id="validation-no-time-trace",
+        )
+        env = SyntheticPortfolioEnv(
+            **dataset.environment_kwargs(),
+            observation_schema=OBSERVATION_SCHEMA_WITHOUT_TIME,
+        )
+
+        class RecordingModel:
+            def predict(self, observation, deterministic=True):
+                self.last_observation = np.array(observation, copy=True)
+                action = np.full(7, -0.5, dtype=np.float32)
+                action[0] = 0.5
+                return action, None
+
+        captured = {}
+        evaluation = evaluate_ppo_synthetic(
+            RecordingModel(),
+            env,
+            observation_diagnostics_callback=captured.update,
+        )
+
+        self.assertEqual(evaluation["steps"], 1)
+        self.assertEqual(captured["observation_schema"], OBSERVATION_SCHEMA_WITHOUT_TIME)
+        self.assertEqual(captured["observation_size"], 42)
+        self.assertEqual(captured["decision_count"], 1)
+        decision = captured["decisions"][0]
+        self.assertEqual(len(decision["raw_observation"]), 42)
+        self.assertNotIn(
+            "time_remaining_fraction",
+            decision["observation_features"],
+        )
+        json.dumps(captured, allow_nan=False)
+
     def test_historical_training_authorization_safeguard(self):
         class HistoricalEnv(gym.Env):
             metadata = {"synthetic": False, "source_type": "historical"}
@@ -294,10 +454,12 @@ class Phase4WorkflowTests(unittest.TestCase):
             device="cpu",
         )
         model = create_ppo_agent(bundle.train_env, config)
+        observation_trace = {}
         evaluation = evaluate_phase4(
             model,
             bundle.test_env,
             initial_capital=50_000.0,
+            observation_diagnostics_callback=observation_trace.update,
         )
 
         self.assertEqual(evaluation["evaluation_type"], "synthetic-only")
@@ -320,6 +482,10 @@ class Phase4WorkflowTests(unittest.TestCase):
             )
         )
         self.assertEqual(len(evaluation["strategies"]), 5)
+        self.assertEqual(
+            observation_trace["decision_count"],
+            evaluation["ppo"]["steps"],
+        )
         ppo = evaluation["ppo"]
         diagnostics = ppo["allocation_diagnostics"]
         self.assertEqual(
