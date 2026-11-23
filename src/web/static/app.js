@@ -7,6 +7,8 @@ const sampleAssets = [
 ];
 let portfolioState = { values: [], risk: null, assets: [], period: 'ALL', sort: { key: 'asset', ascending: true } };
 let selectedPpoRunId = null;
+const CSV_ANALYSIS_MAX_MB = 25;
+$('#csv-analysis-message').textContent = `Any CSV up to ${CSV_ANALYSIS_MAX_MB} MB can be inspected. A date column plus Close, Adjusted Close, Price, or Value enables a price chart.`;
 
 const money = (value) => Number.isFinite(Number(value)) ? Number(value).toLocaleString('en-IN', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }) : '--';
 const percent = (value) => Number.isFinite(Number(value)) ? `${(Number(value) * 100).toFixed(2)}%` : '--';
@@ -44,13 +46,20 @@ async function refreshStorage() {
   }
 }
 
-function parseCsv(text) {
+function detectCsvDelimiter(text) {
+  const firstLine = text.split(/\r?\n/, 1)[0] || '';
+  return [',', ';', '\t', '|'].reduce((best, delimiter) => (
+    firstLine.split(delimiter).length > firstLine.split(best).length ? delimiter : best
+  ), ',');
+}
+
+function parseCsv(text, delimiter = detectCsvDelimiter(text)) {
   const rows = []; let row = []; let field = ''; let quoted = false;
   for (let index = 0; index < text.length; index += 1) {
     const character = text[index]; const next = text[index + 1];
     if (character === '"' && quoted && next === '"') { field += '"'; index += 1; }
     else if (character === '"') quoted = !quoted;
-    else if (character === ',' && !quoted) { row.push(field.trim()); field = ''; }
+    else if (character === delimiter && !quoted) { row.push(field.trim()); field = ''; }
     else if ((character === '\n' || character === '\r') && !quoted) {
       if (character === '\r' && next === '\n') index += 1;
       row.push(field.trim()); if (row.some((value) => value)) rows.push(row); row = []; field = '';
@@ -66,11 +75,18 @@ function findColumn(headers, candidates) {
   return position < 0 ? -1 : position;
 }
 
+function sampleSeries(series, maximumPoints = 1200) {
+  if (series.length <= maximumPoints) return series;
+  const step = (series.length - 1) / (maximumPoints - 1);
+  return Array.from({ length: maximumPoints }, (_, index) => series[Math.round(index * step)]);
+}
+
 function renderCsvAnalysis(filename, headers, rows) {
   const result = $('#csv-analysis-result');
   const summary = $('#csv-analysis-summary');
   const dateIndex = findColumn(headers, ['date', 'datetime', 'timestamp', 'time']);
   const valueIndex = findColumn(headers, ['adjustedclose', 'adjclose', 'close', 'price', 'value', 'nav']);
+  const symbolIndex = findColumn(headers, ['symbol', 'ticker', 'asset', 'security']);
   const numericColumns = headers.filter((_, index) => rows.some((row) => Number.isFinite(Number(String(row[index] || '').replace(/,/g, '')))));
   summary.innerHTML = [
     ['File', filename], ['Rows detected', rows.length], ['Columns', headers.length],
@@ -80,10 +96,20 @@ function renderCsvAnalysis(filename, headers, rows) {
   $('#csv-analysis-table thead').innerHTML = `<tr>${previewHeaders.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr>`;
   $('#csv-analysis-table tbody').innerHTML = previewRows.map((row) => `<tr>${previewHeaders.map((_, index) => `<td>${escapeHtml(row[index] || '')}</td>`).join('')}</tr>`).join('');
   if (dateIndex >= 0 && valueIndex >= 0) {
-    const series = rows.map((row) => ({ date: row[dateIndex], value: Number(String(row[valueIndex] || '').replace(/,/g, '')) }))
+    let series = rows.map((row) => ({ date: row[dateIndex], value: Number(String(row[valueIndex] || '').replace(/,/g, '')), symbol: row[symbolIndex] || '' }))
       .filter((point) => !Number.isNaN(new Date(point.date).getTime()) && Number.isFinite(point.value))
       .sort((left, right) => new Date(left.date) - new Date(right.date));
-    drawChart('#csv-analysis-chart', series);
+    let selectedSymbol = '';
+    if (symbolIndex >= 0) {
+      const counts = series.reduce((total, point) => { total[point.symbol] = (total[point.symbol] || 0) + 1; return total; }, {});
+      selectedSymbol = Object.entries(counts).sort((left, right) => right[1] - left[1])[0]?.[0] || '';
+      series = series.filter((point) => point.symbol === selectedSymbol);
+    }
+    const chartSeries = sampleSeries(series);
+    if (chartSeries.length >= 2) {
+      drawChart('#csv-analysis-chart', chartSeries);
+      summary.insertAdjacentHTML('beforeend', `<div class="result-row"><span>Chart series</span><strong>${escapeHtml(selectedSymbol || headers[valueIndex])}: ${series.length.toLocaleString()} points${chartSeries.length < series.length ? ` (sampled to ${chartSeries.length.toLocaleString()})` : ''}</strong></div>`);
+    } else $('#csv-analysis-chart').innerHTML = '<div class="chart-empty">A compatible price series needs at least two valid dated rows.</div>';
   } else $('#csv-analysis-chart').innerHTML = '<div class="chart-empty">No chart created. Add a Date column and a Close, Adjusted Close, Price, Value, or NAV column to view a series.</div>';
   result.hidden = false;
 }
@@ -92,7 +118,7 @@ $('#csv-analysis-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const file = $('#csv-analysis-file').files[0]; const message = $('#csv-analysis-message'); const button = $('#csv-analysis-button');
   if (!file) { message.className = 'form-message error'; message.textContent = 'Choose a CSV file first.'; return; }
-  if (file.size > 10 * 1024 * 1024) { message.className = 'form-message error'; message.textContent = 'CSV files must be 10 MB or smaller.'; return; }
+  if (file.size > CSV_ANALYSIS_MAX_MB * 1024 * 1024) { message.className = 'form-message error'; message.textContent = `For browser performance, use a CSV of ${CSV_ANALYSIS_MAX_MB} MB or smaller. Filter or split larger files first.`; return; }
   button.disabled = true; message.className = 'form-message'; message.textContent = 'Analysing your CSV locally...';
   try {
     const parsed = parseCsv(await file.text());
