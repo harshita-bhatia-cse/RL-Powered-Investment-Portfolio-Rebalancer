@@ -1,382 +1,85 @@
-
 <!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FinRL Trading Dashboard</title>
-    <link rel="stylesheet" href="/static/styles.css?v=3">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Research dashboard for the Investment Portfolio Rebalancer.">
+  <title>Investment Portfolio Rebalancer</title>
+  <link rel="stylesheet" href="/static/styles.css?v=6">
 </head>
 <body>
-
-<aside class="sidebar">
-    <a class="brand" href="#overview">📈 FINRL</a>
-    <p class="side-label">Navigation</p>
-
-    <nav id="navigation">
-        <button data-view="overview" class="active">Overview</button>
-        <button data-view="data">Data management</button>
-        <button data-view="synthetic">Synthetic RL lab</button>
-        <button data-view="backtesting">Strategy backtesting</button>
-        <button data-view="analysis">Portfolio analysis</button>
-        <button data-view="settings">Settings</button>
+  <header class="topbar">
+    <a class="brand" href="#overview" aria-label="Investment Portfolio Rebalancer home">
+      <span class="brand-mark" aria-hidden="true">IP</span><span>Investment Portfolio Rebalancer</span>
+    </a>
+    <nav class="desktop-nav" id="navigation" aria-label="Primary navigation">
+      <button class="active" data-view="overview">Overview</button>
+      <button data-view="analysis">Portfolio</button>
+      <button data-view="backtesting">Strategy evaluation</button>
+      <button data-view="synthetic">RL lab</button>
+      <button data-view="data">Data</button>
+      <button data-view="settings">Settings</button>
     </nav>
+    <div class="topbar-actions">
+      <span id="api-status" class="api-status" title="Backend connection status">Connecting</span>
+      <button id="refresh-dashboard" class="icon-button" type="button" aria-label="Refresh dashboard data" title="Refresh dashboard data">&#10227;</button>
+    </div>
+  </header>
 
-    <section class="quick-stats">
-        <p class="side-label">Quick stats</p>
-        <div class="stat-grid">
-            <div>
-                <span>Price records</span>
-                <strong id="price-records">—</strong>
-            </div>
-            <div>
-                <span>Stored files</span>
-                <strong id="stored-files">—</strong>
-            </div>
-        </div>
-        <div class="storage">
-            <span>Storage used</span>
-            <strong id="storage-used">—</strong>
-        </div>
-    </section>
-
-    <p class="sidebar-note">
-        Research and paper-trading environment. No orders are executed from this dashboard.
-    </p>
-</aside>
-
-<main class="content">
-
-    <header class="app-header">
-        <div>
-            <h1>📈 FinRL Trading Dashboard</h1>
-            <p>AI-powered quantitative trading platform</p>
-        </div>
-        <span id="api-status" class="status">Connecting…</span>
-    </header>
-
-    <!-- OVERVIEW -->
+  <main class="app-shell">
     <section id="overview" class="view active">
-        <div class="view-heading">
-            <p class="eyebrow">RESEARCH OVERVIEW</p>
-            <h2>Trading overview</h2>
-            <p>
-                Start with reproducible synthetic data, then compare an RL policy
-                with transparent conventional baselines.
-            </p>
-        </div>
+      <div class="section-title compact-title">
+        <div><p class="eyebrow">Research dashboard</p><h1>Portfolio overview</h1></div>
+        <div class="title-actions"><span id="overview-source" class="subtle-label">No evaluation loaded</span><button id="load-overview" class="secondary-button" type="button">Load saved evaluation</button></div>
+      </div>
 
-        <div class="notice">
-            <strong>Ready for synthetic experiments.</strong>
-            Generate an in-memory market scenario in Synthetic RL Lab.
-            Historical metrics appear after experiments are saved.
-        </div>
+      <div class="metric-grid overview-metrics" aria-label="Portfolio metrics">
+        <article class="metric-card"><span class="metric-icon mint">N</span><div><p>PPO ending NAV</p><strong id="overview-nav">--</strong><small id="overview-nav-note">Saved evaluation required</small></div></article>
+        <article class="metric-card"><span class="metric-icon blue">R</span><div><p>Cumulative return</p><strong id="overview-return">--</strong><small id="overview-return-note">Saved evaluation required</small></div></article>
+        <article class="metric-card"><span class="metric-icon violet">S</span><div><p>Sharpe ratio</p><strong id="overview-sharpe">--</strong><small id="overview-sharpe-note">Saved evaluation required</small></div></article>
+        <article class="metric-card"><span class="metric-icon amber">D</span><div><p>Maximum drawdown</p><strong id="overview-drawdown">--</strong><small id="overview-drawdown-note">Saved evaluation required</small></div></article>
+      </div>
 
-        <div class="metric-grid">
-            <article>
-                <span>Workflow</span>
-                <strong>Synthetic</strong>
-                <small>Research data source</small>
-            </article>
-            <article>
-                <span>Agent</span>
-                <strong>PPO</strong>
-                <small>Stable-Baselines3</small>
-            </article>
-            <article>
-                <span>Execution</span>
-                <strong>Paper only</strong>
-                <small>Safeguarded mode</small>
-            </article>
-            <article>
-                <span>Analytics</span>
-                <strong>Available</strong>
-                <small>Stored price data</small>
-            </article>
-        </div>
-
-        <article class="panel">
-            <p class="eyebrow">RECOMMENDED FLOW</p>
-            <h3>Build evidence before making claims</h3>
-            <ol class="checklist">
-                <li><b>01</b> Generate fixed-seed train, validation, and test scenarios.</li>
-                <li><b>02</b> Train PPO offline with transaction costs and turnover limits.</li>
-                <li><b>03</b> Evaluate once on untouched test data.</li>
-                <li><b>04</b> Compare RL with equal-weight and buy-and-hold results.</li>
-            </ol>
+      <div class="dashboard-grid">
+        <article class="panel performance-panel">
+          <div class="panel-header"><div><h2>Portfolio performance</h2><p id="performance-caption">Load a historical portfolio below to render real stored-price data.</p></div><div id="period-filters" class="period-filters" aria-label="Chart date filters"><button data-period="1M" type="button">1M</button><button data-period="3M" type="button">3M</button><button data-period="6M" type="button">6M</button><button data-period="1Y" type="button">1Y</button><button class="active" data-period="ALL" type="button">All</button></div></div>
+          <div id="performance-chart" class="line-chart" aria-live="polite"><div class="chart-empty">No historical portfolio series loaded.</div></div>
+          <div class="chart-legend"><span><i class="legend-line portfolio"></i>Portfolio value</span><span id="chart-range">Select assets and load data in Portfolio.</span></div>
         </article>
-    </section>
-
-    <!-- DATA MANAGEMENT -->
-    <section id="data" class="view">
-        <div class="view-heading">
-            <p class="eyebrow">DATA PIPELINE</p>
-            <h2>Data management</h2>
-            <p>
-                Inspect local storage before importing or downloading data.
-                Existing provider and processing modules remain in the Python backend.
-            </p>
-        </div>
-
-        <div class="tabs" data-tabs>
-            <button class="active" data-tab="sources">Data sources</button>
-            <button data-tab="processing">Data processing</button>
-            <button data-tab="storage">Data storage</button>
-            <button data-tab="quality">Data quality</button>
-        </div>
-
-        <div class="tab-panel active" data-tab-panel="sources">
-            <div class="two-col">
-                <article class="panel">
-                    <h3>Historical data</h3>
-                    <p>
-                        Use the configured FMP/Yahoo/WRDS pipeline to acquire
-                        historical prices. Provider keys remain in .env,
-                        never in this browser.
-                    </p>
-                    <a class="button-link" href="/docs" target="_blank" rel="noopener">
-                        View backend API documentation ↗
-                    </a>
-                </article>
-
-                <article class="panel">
-                    <h3>Local CSV data</h3>
-                    <p>
-                        CSV import remains a backend operation so validation,
-                        provenance, and storage stay under project control.
-                    </p>
-                    <p class="muted">
-                        Use date, ticker, OHLC/adjusted close, and volume fields.
-                    </p>
-                </article>
-            </div>
-        </div>
-
-        <div class="tab-panel" data-tab-panel="processing">
-            <article class="panel">
-                <h3>Processing workflow</h3>
-                <p>
-                    Clean prices and fundamentals, align trading days,
-                    validate adjustments, then create the ML/RL-ready dataset.
-                    Keep raw and processed files separate for reproducibility.
-                </p>
-            </article>
-        </div>
-
-        <div class="tab-panel" data-tab-panel="storage">
-            <article class="panel">
-                <h3>Local storage</h3>
-                <pre id="storage-json">Loading storage statistics…</pre>
-            </article>
-        </div>
-
-        <div class="tab-panel" data-tab-panel="quality">
-            <article class="panel">
-                <h3>Data quality</h3>
-                <p>
-                    Quality checks become available when local price records exist.
-                    Do not train on unchecked data.
-                </p>
-            </article>
-        </div>
-    </section>
-
-    <!-- SYNTHETIC RL LAB -->
-    <section id="synthetic" class="view">
-        <div class="view-heading">
-            <p class="eyebrow">REPRODUCIBLE ENVIRONMENT</p>
-            <h2>Synthetic RL lab</h2>
-            <p>
-                Preview the project’s regime-switching synthetic market generator
-                without training or writing files.
-            </p>
-        </div>
-
-        <div class="two-col">
-            <article class="panel">
-                <h3>Scenario configuration</h3>
-                <form id="synthetic-form" class="stack-form">
-                    <label>
-                        Random seed
-                        <input id="synthetic-seed" type="number" min="0" value="42">
-                    </label>
-                    <label>
-                        Trading sessions
-                        <input id="synthetic-sessions" type="number" min="20" max="2520" value="252">
-                    </label>
-                    <button class="primary-button" type="submit">
-                        Generate synthetic preview
-                    </button>
-                </form>
-                <p id="synthetic-message" class="form-message"></p>
-            </article>
-
-            <article class="panel">
-                <h3>Scenario summary</h3>
-                <div id="synthetic-result" class="result-empty">
-                    Generate a scenario to inspect regimes, VIX path,
-                    benchmark growth, and the fixed asset universe.
-                </div>
-            </article>
-        </div>
-    </section>
-
-    <!-- STRATEGY BACKTESTING -->
-    <section id="backtesting" class="view">
-        <div class="view-heading">
-            <p class="eyebrow">OFFLINE EVALUATION</p>
-            <h2>Strategy backtesting</h2>
-            <p>
-                Backtests must use historical or synthetic data already prepared
-                by the backend—not browser-generated prices.
-            </p>
-        </div>
-
-        <article class="panel">
-            <h3>Backtest controls</h3>
-            <p>
-                The backtest engine, allocation strategies, and adaptive-rotation
-                runner are preserved. Run experiments from the Python workflow,
-                save outputs, then expose read-only results here.
-            </p>
-            <code>python src/strategies/run_adaptive_rotation_strategy.py --backtest</code>
+        <article class="panel allocation-panel">
+          <div class="panel-header"><div><h2>Asset allocation</h2><p>Current target weights</p></div></div>
+          <div class="allocation-content"><div id="allocation-chart" class="donut-chart"><div><strong id="allocation-total">100%</strong><span>allocated</span></div></div><div id="allocation-legend" class="allocation-legend"></div></div>
         </article>
+      </div>
 
-        <!-- PPO VALIDATION RESULTS -->
-        <article class="panel ppo-validation-panel">
-            <div class="panel-heading">
-                <div>
-                    <p class="eyebrow">PHASE 5.16 · SAVED MODEL</p>
-                    <h3>PPO validation results</h3>
-                    <p>
-                        Deterministic evaluation of the existing trained PPO model.
-                    </p>
-                </div>
-
-                <div class="button-group">
-                    <button id="train-synthetic-ppo" class="secondary-button" type="button">
-                        Train synthetic PPO
-                    </button>
-                    <button id="load-ppo-validation" class="primary-button" type="button">
-                        Load validation results
-                    </button>
-                </div>
-            </div>
-
-            <p id="ppo-validation-message" class="form-message">
-                Train a new isolated synthetic experiment, or load an existing saved model.
-            </p>
-
-            <div id="ppo-validation-results" hidden>
-                <div class="notice">
-                    <strong>Synthetic research only.</strong>
-                    These results are not real-market investment performance
-                    or investment advice.
-                </div>
-
-                <div class="metric-grid">
-                    <article>
-                        <span>PPO ending NAV</span>
-                        <strong id="ppo-nav">—</strong>
-                        <small>Same evaluation capital as benchmarks</small>
-                    </article>
-
-                    <article>
-                        <span>Equal-weight NAV</span>
-                        <strong id="equal-nav">—</strong>
-                        <small>Daily rebalancing</small>
-                    </article>
-
-                    <article>
-                        <span>SPY buy-and-hold NAV</span>
-                        <strong id="buyhold-nav">—</strong>
-                        <small>SPY-only buy-and-hold benchmark</small>
-                    </article>
-
-                    <article>
-                        <span>Monthly rebalancing NAV</span>
-                        <strong id="monthly-nav">—</strong>
-                        <small>Equal-weight targets</small>
-                    </article>
-
-                    <article>
-                        <span>Threshold rebalancing NAV</span>
-                        <strong id="threshold-nav">—</strong>
-                        <small>Equal-weight drift threshold</small>
-                    </article>
-
-                    <article>
-                        <span>PPO transaction costs</span>
-                        <strong id="ppo-cost">—</strong>
-                        <small>Fees plus slippage</small>
-                    </article>
-                </div>
-
-                <h4>Strategy comparison</h4>
-                <div id="ppo-comparison" class="result-list"></div>
-
-                <h4>Final PPO allocation</h4>
-                <div id="ppo-weights" class="allocation-legend"></div>
-
-                <p id="ppo-scenario" class="muted"></p>
-            </div>
-        </article>
+      <div class="bottom-grid">
+        <article class="panel"><div class="panel-header"><div><h2>Risk analytics</h2><p>Available after a historical portfolio is loaded</p></div></div><dl id="risk-summary" class="definition-list"><div><dt>Volatility</dt><dd>--</dd></div><div><dt>Sharpe ratio</dt><dd>--</dd></div><div><dt>Max drawdown</dt><dd>--</dd></div><div><dt>CVaR</dt><dd>--</dd></div></dl></article>
+        <article class="panel"><div class="panel-header"><div><h2>RL agent performance</h2><p>Saved synthetic validation results</p></div></div><div id="agent-summary" class="agent-summary"><span class="empty-inline">Load a saved evaluation to compare PPO with benchmarks.</span></div></article>
+        <article class="panel"><div class="panel-header"><div><h2>Rebalancing status</h2><p>Research and paper mode only</p></div></div><div id="rebalancing-summary" class="agent-summary"><span class="empty-inline">No evaluated rebalance history is available through the current API.</span></div></article>
+      </div>
     </section>
 
-    <!-- PORTFOLIO ANALYSIS -->
     <section id="analysis" class="view">
-        <div class="view-heading">
-            <p class="eyebrow">HISTORICAL ANALYTICS</p>
-            <h2>Portfolio analysis</h2>
-            <p>
-                Validate target weights using the existing FastAPI analytics service.
-                Historical metrics require local price data.
-            </p>
-        </div>
-
-        <div class="two-col">
-            <article class="panel">
-                <h3>Portfolio inputs</h3>
-                <form id="allocation-form">
-                    <div id="allocation-rows" class="allocation-rows"></div>
-                    <div class="form-actions">
-                        <button id="add-asset" class="secondary-button" type="button">
-                            + Add asset
-                        </button>
-                        <button class="primary-button" type="submit">
-                            Validate allocation
-                        </button>
-                    </div>
-                </form>
-                <p id="form-message" class="form-message"></p>
-            </article>
-
-            <article class="panel">
-                <h3>Target allocation</h3>
-                <div id="allocation-chart" class="allocation-chart"></div>
-                <div id="allocation-legend" class="allocation-legend"></div>
-            </article>
-        </div>
+      <div class="section-title"><div><p class="eyebrow">Historical analytics</p><h1>Portfolio analysis</h1><p>Use locally stored historical prices. No live orders are created.</p></div><button id="export-portfolio" class="secondary-button" type="button" disabled>Export loaded metrics</button></div>
+      <div class="analysis-layout">
+        <article class="panel input-panel"><h2>Portfolio inputs</h2><form id="allocation-form"><div id="allocation-rows" class="allocation-rows"></div><button id="add-asset" class="text-button" type="button">+ Add asset</button><div class="form-grid"><label>Start date<input id="analysis-start" type="date" value="2023-01-01"></label><label>End date<input id="analysis-end" type="date" value="2024-01-01"></label><label>Initial investment<input id="analysis-capital" type="number" min="1" value="100000"></label></div><button class="primary-button wide" type="submit">Load portfolio analytics</button></form><p id="form-message" class="form-message" role="status"></p></article>
+        <article class="panel"><div class="panel-header"><div><h2>Performance summary</h2><p>Values are calculated by the existing backend.</p></div></div><div id="performance-metrics" class="metric-grid small-metrics"><article><p>Current value</p><strong>--</strong></article><article><p>Total return</p><strong>--</strong></article><article><p>Annualized return</p><strong>--</strong></article></div><div id="analysis-chart" class="line-chart"><div class="chart-empty">Load local historical data to view the portfolio value series.</div></div></article>
+      </div>
+      <article class="panel table-panel"><div class="panel-header"><div><h2>Asset performance</h2><p>Sortable metrics returned by the analytics API.</p></div></div><div class="table-wrap"><table id="asset-table"><thead><tr><th data-sort="asset">Asset</th><th data-sort="weight">Weight</th><th data-sort="total_return">Total return</th><th data-sort="annualized_volatility">Volatility</th></tr></thead><tbody><tr><td colspan="4" class="empty-cell">No asset analytics loaded.</td></tr></tbody></table></div></article>
     </section>
 
-    <!-- SETTINGS -->
-    <section id="settings" class="view">
-        <div class="view-heading">
-            <p class="eyebrow">CONFIGURATION</p>
-            <h2>Settings</h2>
-        </div>
-
-        <article class="panel">
-            <h3>Safe configuration</h3>
-            <p>
-                Edit .env for FMP, Alpaca paper-trading, database, and logging values.
-                Do not put API keys in HTML, CSS, or JavaScript.
-            </p>
-        </article>
+    <section id="backtesting" class="view">
+      <div class="section-title"><div><p class="eyebrow">Strategy evaluation</p><h1>PPO validation and benchmarks</h1><p>All results are synthetic research outputs, not live-market performance.</p></div></div>
+      <article class="panel ppo-validation-panel"><div class="panel-header"><div><h2>Saved PPO model</h2><p>Deterministic validation against the existing benchmark set.</p></div><div class="button-group"><button id="train-synthetic-ppo" class="secondary-button" type="button">Train synthetic PPO</button><button id="load-ppo-validation" class="primary-button" type="button">Load validation results</button></div></div><p id="ppo-validation-message" class="form-message">Train an isolated synthetic experiment, or load an existing saved model.</p><div id="ppo-validation-results" hidden><div class="metric-grid small-metrics"><article><p>PPO ending NAV</p><strong id="ppo-nav">--</strong></article><article><p>Equal-weight NAV</p><strong id="equal-nav">--</strong></article><article><p>Buy-and-hold NAV</p><strong id="buyhold-nav">--</strong></article><article><p>PPO transaction costs</p><strong id="ppo-cost">--</strong></article></div><div class="comparison-layout"><div><h3>Strategy comparison</h3><div id="ppo-comparison" class="result-list"></div></div><div><h3>Final PPO allocation</h3><div id="ppo-weights" class="result-list"></div></div></div><p id="ppo-scenario" class="subtle-label"></p></div></article>
     </section>
 
-</main>
+    <section id="synthetic" class="view"><div class="section-title"><div><p class="eyebrow">Reproducible environment</p><h1>Synthetic RL lab</h1><p>Preview the existing regime-switching market generator without training or writing files.</p></div></div><div class="two-column"><article class="panel"><h2>Scenario configuration</h2><form id="synthetic-form" class="stack-form"><label>Random seed<input id="synthetic-seed" type="number" min="0" value="42"></label><label>Trading sessions<input id="synthetic-sessions" type="number" min="20" max="2520" value="252"></label><button class="primary-button" type="submit">Generate preview</button></form><p id="synthetic-message" class="form-message"></p></article><article class="panel"><h2>Scenario summary</h2><div id="synthetic-result" class="empty-state">Generate a scenario to inspect regimes, VIX movement, benchmark growth, and the fixed asset universe.</div></article></div></section>
 
-<script src="/static/app.js?v=5"></script>
+    <section id="data" class="view"><div class="section-title"><div><p class="eyebrow">Data pipeline</p><h1>Data management</h1><p>Storage and data quality remain controlled by the existing backend.</p></div><button id="refresh-storage" class="secondary-button" type="button">Refresh storage</button></div><div class="tabs" data-tabs><button class="active" data-tab="storage">Storage</button><button data-tab="sources">Data sources</button><button data-tab="quality">Data quality</button></div><div class="tab-panel active" data-tab-panel="storage"><article class="panel"><h2>Local storage</h2><pre id="storage-json">Loading storage statistics...</pre></article></div><div class="tab-panel" data-tab-panel="sources"><article class="panel"><h2>Configured data sources</h2><p>Market-data provider credentials remain server-side in <code>.env</code>. The frontend does not expose keys or call providers directly.</p><a class="secondary-button" href="/docs" target="_blank" rel="noopener">Open API documentation</a></article></div><div class="tab-panel" data-tab-panel="quality"><article class="panel"><h2>Data quality</h2><p>Quality reports are available after valid local price records have been loaded by the existing data pipeline.</p></article></div></section>
+
+    <section id="settings" class="view"><div class="section-title"><div><p class="eyebrow">Configuration</p><h1>Settings</h1><p>Protected configuration remains outside the browser.</p></div></div><article class="panel"><h2>Safe configuration</h2><p>Keep API keys, database settings, logging configuration, and paper-trading credentials in <code>.env</code>. This dashboard does not modify those settings.</p></article></section>
+  </main>
+  <div id="chart-tooltip" class="chart-tooltip" hidden></div>
+  <script src="/static/app.js?v=6"></script>
 </body>
 </html>
