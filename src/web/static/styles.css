@@ -2,6 +2,12 @@
 
 
 /* PPO validation results */
+.button-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
 #ppo-validation-results {
     margin-top: 18px;
 }

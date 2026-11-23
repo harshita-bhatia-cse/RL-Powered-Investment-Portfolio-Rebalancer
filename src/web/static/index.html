@@ -253,13 +253,18 @@
                     </p>
                 </div>
 
-                <button id="load-ppo-validation" class="primary-button" type="button">
-                    Load validation results
-                </button>
+                <div class="button-group">
+                    <button id="train-synthetic-ppo" class="secondary-button" type="button">
+                        Train synthetic PPO
+                    </button>
+                    <button id="load-ppo-validation" class="primary-button" type="button">
+                        Load validation results
+                    </button>
+                </div>
             </div>
 
             <p id="ppo-validation-message" class="form-message">
-                Load the saved model's validation results.
+                Train a new isolated synthetic experiment, or load an existing saved model.
             </p>
 
             <div id="ppo-validation-results" hidden>

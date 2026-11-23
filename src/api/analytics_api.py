@@ -11,7 +11,7 @@ from typing import Dict, List
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, status as http_status
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
@@ -256,14 +256,15 @@ def synthetic_preview(
     }
 
 
-def _get_ppo_validation_result():
+def _get_ppo_validation_result(artifact_dir: Path | None = None):
     """Evaluate the saved synthetic PPO model on its reproducible validation scenario."""
-    artifact_dir = Path(
-        os.environ.get(
-            "PPO_ARTIFACT_DIR",
-            str(Path(__file__).resolve().parents[2] / ".artifacts" / "ppo"),
-        )
-    ).expanduser()
+    if artifact_dir is None:
+        artifact_dir = Path(
+            os.environ.get(
+                "PPO_ARTIFACT_DIR",
+                str(Path(__file__).resolve().parents[2] / ".artifacts" / "ppo"),
+            )
+        ).expanduser()
 
     model_path = next(
         (
@@ -480,6 +481,44 @@ def _get_ppo_validation_result():
 def ppo_validation():
     """Return a reproducible, read-only synthetic PPO validation comparison."""
     return _get_ppo_validation_result()
+
+
+@app.post("/api/ppo/runs", status_code=http_status.HTTP_202_ACCEPTED, tags=["synthetic"])
+def start_synthetic_ppo_training():
+    """Start one isolated, synthetic-only PPO run for the dashboard."""
+    from src.api.synthetic_training_jobs import start_training
+
+    try:
+        return start_training()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail=f"could not start PPO training: {exc}") from exc
+
+
+@app.get("/api/ppo/runs/{run_id}", tags=["synthetic"])
+def synthetic_ppo_training_status(run_id: str):
+    """Return status for an isolated synthetic PPO dashboard run."""
+    from src.api.synthetic_training_jobs import status
+
+    try:
+        return status(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="training run not found") from exc
+
+
+@app.get("/api/ppo/runs/{run_id}/validation", tags=["synthetic"])
+def synthetic_ppo_run_validation(run_id: str):
+    """Evaluate a completed dashboard run without changing its artifacts."""
+    from src.api.synthetic_training_jobs import run_directory, status
+
+    try:
+        current = status(run_id)
+        if current["state"] != "completed":
+            raise HTTPException(status_code=409, detail="training run has not completed")
+        return _get_ppo_validation_result(run_directory(run_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="training run not found") from exc
 
 
 # Mount the dashboard last: API routes above retain priority over static files.

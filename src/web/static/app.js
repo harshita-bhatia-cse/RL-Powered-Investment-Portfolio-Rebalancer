@@ -13,6 +13,7 @@ fetch('/api/status').then(r=>r.json()).then(d=>{$('#api-status').textContent=`AP
 // PPO VALIDATION RESULTS
 // ==========================================
 
+let selectedPpoRunId = null;
 const ppoButton = document.querySelector('#load-ppo-validation');
 
 if (ppoButton) {
@@ -53,7 +54,10 @@ if (ppoButton) {
             'Loading the saved PPO model and evaluating its validation scenario...';
 
         try {
-            const response = await fetch('/api/ppo/validation');
+            const validationUrl = selectedPpoRunId
+                ? `/api/ppo/runs/${encodeURIComponent(selectedPpoRunId)}/validation`
+                : '/api/ppo/validation';
+            const response = await fetch(validationUrl);
             const data = await response.json();
 
             if (!response.ok) {
@@ -167,6 +171,67 @@ if (ppoButton) {
         } finally {
             ppoButton.disabled = false;
             ppoButton.textContent = 'Load validation results';
+        }
+    });
+}
+
+const trainPpoButton = document.querySelector('#train-synthetic-ppo');
+
+if (trainPpoButton) {
+    const trainingMessage = document.querySelector('#ppo-validation-message');
+
+    async function pollSyntheticTraining(runId) {
+        const response = await fetch(`/api/ppo/runs/${encodeURIComponent(runId)}`);
+        const job = await response.json();
+        if (!response.ok) {
+            throw new Error(job.detail || 'Could not read synthetic training status.');
+        }
+
+        if (job.state === 'running') {
+            trainingMessage.className = 'form-message';
+            trainingMessage.textContent = 'Synthetic PPO training is running. This may take a few minutes; do not close the server.';
+            window.setTimeout(() => pollSyntheticTraining(runId).catch(showTrainingError), 2000);
+            return;
+        }
+
+        trainPpoButton.disabled = false;
+        trainPpoButton.textContent = 'Train synthetic PPO';
+
+        if (job.state === 'completed') {
+            selectedPpoRunId = runId;
+            trainingMessage.className = 'form-message';
+            trainingMessage.textContent = 'Training completed. Loading deterministic validation and benchmark results…';
+            ppoButton.click();
+            return;
+        }
+
+        throw new Error(job.log_tail || 'Synthetic PPO training did not complete.');
+    }
+
+    function showTrainingError(error) {
+        trainPpoButton.disabled = false;
+        trainPpoButton.textContent = 'Train synthetic PPO';
+        trainingMessage.className = 'form-message error';
+        trainingMessage.textContent = error.message || 'Synthetic PPO training failed.';
+    }
+
+    trainPpoButton.addEventListener('click', async () => {
+        trainPpoButton.disabled = true;
+        trainPpoButton.textContent = 'Starting…';
+        trainingMessage.className = 'form-message';
+        trainingMessage.textContent = 'Creating an isolated synthetic-only PPO experiment…';
+
+        try {
+            const response = await fetch('/api/ppo/runs', { method: 'POST' });
+            const job = await response.json();
+            if (!response.ok) {
+                throw new Error(job.detail || 'Could not start synthetic PPO training.');
+            }
+            selectedPpoRunId = job.run_id;
+            trainPpoButton.textContent = 'Training…';
+            await pollSyntheticTraining(job.run_id);
+        } catch (error) {
+            showTrainingError(error);
         }
     });
 }
