@@ -1,9 +1,9 @@
 
 <div align="center">
 
-# FinRL-X
+# Investment Portfolio Rebalancer
 
-### An AI-Native Modular Infrastructure for Quantitative Trading
+### A research platform for reinforcement-learning portfolio allocation and rebalancing
 
 <img src="https://github.com/user-attachments/assets/80fe89bb-fb09-4267-b29a-76030512f8cf" width="420">
 
@@ -21,9 +21,9 @@
 ![](https://img.shields.io/github/issues-pr-raw/AI4Finance-Foundation/FinRL-Trading?label=PRs)
 ![Visitors](https://api.visitorbadge.io/api/VisitorHit?user=AI4Finance-Foundation&repo=FinRL-Trading&countColor=%23B17A)
 
-*A deployment-consistent trading system that unifies data processing, strategy composition, backtesting, and broker execution through a weight-centric interface.*
+*Built on FinRL-X: a deployment-consistent research system for data processing, portfolio construction, backtesting, and safeguarded paper-trading integrations.*
 
-[Paper](https://arxiv.org/abs/2603.21330) | [Quick Start](#quick-start) | [Strategies](#strategies) | [Results](#results) | [Discord](https://discord.gg/trsr8SXpW5)
+[Quick Start](#quick-start) | [Dashboard](#investment-portfolio-rebalancer-dashboard) | [Strategies](#strategies) | [Results](#results)
 
 </div>
 
@@ -31,11 +31,11 @@
 
 ## About
 
-**FinRL-X** is a next-generation, **AI-native** quantitative trading infrastructure that redefines how researchers and practitioners build, test, and deploy algorithmic trading strategies. 
+**Investment Portfolio Rebalancer** is an academic and research-oriented application built on the FinRL-X infrastructure. It focuses on portfolio-level allocation decisions: how capital is distributed across assets, when to rebalance, and how transaction costs and risk constraints affect results.
 
-Introduced in our paper *"FinRL-X: An AI-Native Modular Infrastructure for Quantitative Trading"* ([arXiv:2603.21330](https://arxiv.org/abs/2603.21330)), FinRL-X succeeds the original [FinRL](https://github.com/AI4Finance-Foundation/FinRL) framework with a fully modernized architecture designed for the LLM and agentic AI era.
+The application uses reproducible synthetic scenarios, historical analytics, and PPO-based reinforcement-learning experiments. It does not assume that RL is superior to conventional strategies; the question is evaluated through controlled comparisons and risk-adjusted metrics.
 
-> FinRL-X is **not just a library** — it is a full-stack trading platform engineered around modularity, reproducibility, and production-readiness, supporting everything from ML-based stock selection and professional backtesting to live brokerage execution.
+> This project is for education and research. It is not financial advice, does not guarantee returns, and does not execute real-money trades from the dashboard.
 
 At its core is a **weight-centric architecture** — the target portfolio weight vector is the sole interface contract between strategy logic and downstream execution:
 
@@ -232,6 +232,31 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env — set APCA_API_KEY, APCA_API_SECRET, etc.
 ```
+
+### Investment Portfolio Rebalancer dashboard
+
+The dashboard is a responsive HTML, CSS, and JavaScript interface served by
+the existing FastAPI application. It does not expose credentials, execute
+real-money orders, or replace any backend research workflow.
+
+```powershell
+# Windows PowerShell
+python src/main.py dashboard
+```
+
+Open [http://localhost:8501](http://localhost:8501). The dashboard provides:
+
+- Portfolio allocation validation and historical analytics from locally stored price data
+- Interactive portfolio-value chart, allocation chart, risk metrics, and sortable asset table when historical data is available
+- Synthetic market preview using a seed and a selected number of sessions
+- Explicit synthetic PPO training, saved-model validation, and benchmark comparison
+- Storage statistics and API status from the existing FastAPI endpoints
+
+If historical data or a saved PPO artifact is unavailable, the relevant panel
+shows an empty state or an error message instead of displaying invented values.
+Use the **Data** section to inspect local storage and the **Portfolio** section
+to select assets, weights, dates, and initial capital before requesting
+historical analytics.
 
 #### Running Strategies via Python
 
