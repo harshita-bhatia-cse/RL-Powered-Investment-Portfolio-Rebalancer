@@ -13,6 +13,7 @@ from .portfolio_env import (
 )
 from .synthetic_portfolio_env import SyntheticPortfolioEnv
 from .historical_portfolio_env import HistoricalPortfolioEnv, RewardConfig
+from .india_daily_portfolio_env import IndiaDailyPortfolioEnv
 
 __all__ = [
     "ASSET_UNIVERSE",
@@ -27,4 +28,5 @@ __all__ = [
     "SyntheticPortfolioEnv",
     "HistoricalPortfolioEnv",
     "RewardConfig",
+    "IndiaDailyPortfolioEnv",
 ]
