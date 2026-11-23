@@ -44,6 +44,66 @@ async function refreshStorage() {
   }
 }
 
+function parseCsv(text) {
+  const rows = []; let row = []; let field = ''; let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]; const next = text[index + 1];
+    if (character === '"' && quoted && next === '"') { field += '"'; index += 1; }
+    else if (character === '"') quoted = !quoted;
+    else if (character === ',' && !quoted) { row.push(field.trim()); field = ''; }
+    else if ((character === '\n' || character === '\r') && !quoted) {
+      if (character === '\r' && next === '\n') index += 1;
+      row.push(field.trim()); if (row.some((value) => value)) rows.push(row); row = []; field = '';
+    } else field += character;
+  }
+  row.push(field.trim()); if (row.some((value) => value)) rows.push(row);
+  return rows;
+}
+
+function findColumn(headers, candidates) {
+  const normalized = headers.map((header) => header.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  const position = normalized.findIndex((header) => candidates.includes(header));
+  return position < 0 ? -1 : position;
+}
+
+function renderCsvAnalysis(filename, headers, rows) {
+  const result = $('#csv-analysis-result');
+  const summary = $('#csv-analysis-summary');
+  const dateIndex = findColumn(headers, ['date', 'datetime', 'timestamp', 'time']);
+  const valueIndex = findColumn(headers, ['adjustedclose', 'adjclose', 'close', 'price', 'value', 'nav']);
+  const numericColumns = headers.filter((_, index) => rows.some((row) => Number.isFinite(Number(String(row[index] || '').replace(/,/g, '')))));
+  summary.innerHTML = [
+    ['File', filename], ['Rows detected', rows.length], ['Columns', headers.length],
+    ['Available fields', headers.join(', ')], ['Numeric columns', numericColumns.join(', ') || 'None detected'],
+  ].map(([label, value]) => `<div class="result-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('');
+  const previewHeaders = headers.slice(0, 8); const previewRows = rows.slice(0, 8);
+  $('#csv-analysis-table thead').innerHTML = `<tr>${previewHeaders.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr>`;
+  $('#csv-analysis-table tbody').innerHTML = previewRows.map((row) => `<tr>${previewHeaders.map((_, index) => `<td>${escapeHtml(row[index] || '')}</td>`).join('')}</tr>`).join('');
+  if (dateIndex >= 0 && valueIndex >= 0) {
+    const series = rows.map((row) => ({ date: row[dateIndex], value: Number(String(row[valueIndex] || '').replace(/,/g, '')) }))
+      .filter((point) => !Number.isNaN(new Date(point.date).getTime()) && Number.isFinite(point.value))
+      .sort((left, right) => new Date(left.date) - new Date(right.date));
+    drawChart('#csv-analysis-chart', series);
+  } else $('#csv-analysis-chart').innerHTML = '<div class="chart-empty">No chart created. Add a Date column and a Close, Adjusted Close, Price, Value, or NAV column to view a series.</div>';
+  result.hidden = false;
+}
+
+$('#csv-analysis-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const file = $('#csv-analysis-file').files[0]; const message = $('#csv-analysis-message'); const button = $('#csv-analysis-button');
+  if (!file) { message.className = 'form-message error'; message.textContent = 'Choose a CSV file first.'; return; }
+  if (file.size > 10 * 1024 * 1024) { message.className = 'form-message error'; message.textContent = 'CSV files must be 10 MB or smaller.'; return; }
+  button.disabled = true; message.className = 'form-message'; message.textContent = 'Analysing your CSV locally...';
+  try {
+    const parsed = parseCsv(await file.text());
+    if (parsed.length < 2) throw new Error('The CSV needs a header row and at least one data row.');
+    const headers = parsed[0]; const rows = parsed.slice(1).filter((row) => row.length === headers.length);
+    if (!headers.length || !rows.length) throw new Error('No usable rows were found in this CSV.');
+    renderCsvAnalysis(file.name, headers, rows); message.className = 'form-message success'; message.textContent = 'CSV analysis completed. The file was not sent to the server or used for training.';
+  } catch (error) { message.className = 'form-message error'; message.textContent = error.message; }
+  finally { button.disabled = false; }
+});
+
 function currentAssets() {
   return $$('.allocation-row').map((row) => ({
     ticker: row.querySelector('[data-ticker]').value.trim().toUpperCase(),
