@@ -5,22 +5,6 @@
 
 ### A research platform for reinforcement-learning portfolio allocation and rebalancing
 
-<img src="https://github.com/user-attachments/assets/80fe89bb-fb09-4267-b29a-76030512f8cf" width="420">
-
-[![Paper](https://img.shields.io/badge/Paper-arXiv_2603.21330-b31b1b?style=for-the-badge)](https://arxiv.org/abs/2603.21330)
-&nbsp;
-[![PyPI](https://img.shields.io/badge/PyPI-finrl--trading-3775A9?style=for-the-badge&logo=pypi&logoColor=white)](https://pypi.org/project/finrl-trading/)
-
-[![Python 3.11](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-![License](https://img.shields.io/github/license/AI4Finance-Foundation/FinRL-Trading.svg?color=brightgreen)
-[![Downloads](https://static.pepy.tech/badge/finrl-trading)](https://pepy.tech/project/finrl-trading)
-[![Downloads](https://static.pepy.tech/badge/finrl-trading/week)](https://pepy.tech/project/finrl-trading)
-[![Join Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/trsr8SXpW5)
-
-![](https://img.shields.io/github/issues-raw/AI4Finance-Foundation/FinRL-Trading?label=Issues)
-![](https://img.shields.io/github/issues-pr-raw/AI4Finance-Foundation/FinRL-Trading?label=PRs)
-![Visitors](https://api.visitorbadge.io/api/VisitorHit?user=AI4Finance-Foundation&repo=FinRL-Trading&countColor=%23B17A)
-
 *Built on FinRL-X: a deployment-consistent research system for data processing, portfolio construction, backtesting, and safeguarded paper-trading integrations.*
 
 [Quick Start](#quick-start) | [Dashboard](#investment-portfolio-rebalancer-dashboard) | [Strategies](#strategies) | [Results](#results)
@@ -46,12 +30,6 @@ where $\mathcal{S}$ denotes stock selection, $\mathcal{A}$ portfolio allocation,
 ---
 
 ## Architecture
-
-<div align="center">
-  <img src="https://github.com/AI4Finance-Foundation/FinRL-Trading/blob/master/figs/FinRL_X_Framework.png" width="880"/>
-</div>
-
-<br/>
 
 | Layer | Role | Components |
 |:------|:-----|:-----------|
@@ -108,10 +86,6 @@ Compares heterogeneous allocation methods under a unified interface:
 
 All methods output the same weight vector, making them directly composable with timing and risk overlays.
 
-<div align="center">
-  <img src="https://github.com/AI4Finance-Foundation/FinRL-Trading/blob/master/figs/DRL_Timing_Backtest.png" width="900"/>
-</div>
-
 ### Use Case 2 — Rolling Stock Selection + DRL
 
 Quarterly selection of top-25% NASDAQ-100 stocks via ML fundamental scoring, combined with DRL-based portfolio allocation. Strict no-lookahead semantics prevent data leakage.
@@ -143,10 +117,6 @@ A research-grade, walk-forward-safe rotation strategy with daily risk monitoring
 
 ### Historical Backtest (Jan 2018 – Oct 2025)
 
-<div align="center">
-  <img src="https://github.com/AI4Finance-Foundation/FinRL-Trading/blob/master/figs/All_Backtests_v2.png" width="900"/>
-</div>
-
 | Metric | Rolling Strategy | Adaptive Rotation | QQQ | SPY |
 |:-------|:---:|:---:|:---:|:---:|
 | Cumulative Return | 5.98x | 4.80x | 4.02x | 2.80x |
@@ -158,10 +128,6 @@ A research-grade, walk-forward-safe rotation strategy with daily risk monitoring
 | Win Rate | 54.36% | 54.77% | 56.25% | 55.28% |
 
 ### Paper Trading (Oct 2025 – Mar 2026)
-
-<div align="center">
-  <img src="https://github.com/AI4Finance-Foundation/FinRL-Trading/blob/master/figs/Paper_Trading.png" width="900"/>
-</div>
 
 Ensemble of Rolling Selection + Adaptive Rotation deployed on Alpaca paper trading:
 
@@ -177,10 +143,6 @@ Ensemble of Rolling Selection + Adaptive Rotation deployed on Alpaca paper tradi
 | Win Rate | **64.89%** | 52.13% | 54.02% |
 
 ### Dynamic Sector Rotation
-
-<div align="center">
-  <img src="https://github.com/AI4Finance-Foundation/FinRL-Trading/blob/master/figs/Sector_Rotation_Standalone.png" width="900"/>
-</div>
 
 The Adaptive Rotation strategy dynamically shifts capital across three asset groups — **Growth Tech**, **Real Assets**, and **Defensive** — based on market regime signals. During risk-on regimes, the portfolio tilts toward high-momentum growth and commodity plays; when regime detection flags risk-off or fast risk-off conditions, capital rotates into bonds and utilities with an automatic cash buffer. Weekly rebalancing is complemented by daily stop-loss and fast risk-off monitoring, enabling rapid de-risking without waiting for the next scheduled rebalance.
 
@@ -440,7 +402,5 @@ This software is for **educational and research purposes only**. Not financial a
 <div align="center">
 
 **[AI4Finance Foundation](https://github.com/AI4Finance-Foundation)**
-
-<img src="https://github.com/AI4Finance-Foundation/FinGPT/assets/31713746/e0371951-1ce1-488e-aa25-0992dafcc139" width="200"/>
 
 </div>
