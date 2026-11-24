@@ -6,10 +6,14 @@ import json
 import os
 import tempfile
 import time
+from urllib.parse import urlencode
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Any, Protocol, Sequence
+
+import requests
+from dotenv import load_dotenv
 
 import numpy as np
 import pandas as pd
@@ -85,6 +89,9 @@ class IndiaMarketProviderResponse:
     retrieved_at: str
     frames: dict[str, pd.DataFrame]
     action_frames: dict[str, pd.DataFrame]
+    interval: str = "1d"
+    freshness: str = "historical"
+    raw_payloads: dict[str, dict[str, Any]] | None = None
 
 
 class IndiaDailyMarketProvider(Protocol):
@@ -261,6 +268,286 @@ class YahooFinanceIndiaProvider:
         return actions
 
 
+class AlphaVantageIndiaProvider:
+    """Authenticated Alpha Vantage adapter for NSE/BSE daily and intraday data.
+
+    Alpha Vantage is an API-polling provider, not a streaming provider. Intraday
+    responses are therefore reported as delayed_or_unverified and must never be
+    presented as real-time. Subscription limits and endpoint availability are
+    provider-plan dependent.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        base_url: str = "https://www.alphavantage.co/query",
+        retry_count: int = 2,
+        retry_wait_seconds: float = 1.0,
+        timeout_seconds: float = 30.0,
+    ) -> None:
+        selected_key = (
+            api_key
+            if api_key is not None
+            else os.environ.get("ALPHA_VANTAGE_API_KEY", "")
+        )
+        selected_key = str(selected_key).strip()
+        if not selected_key:
+            raise IndiaProviderError(
+                "ALPHA_VANTAGE_API_KEY is required for the alpha-vantage provider"
+            )
+        if isinstance(retry_count, bool) or retry_count < 0:
+            raise ValueError("retry_count must be a non-negative integer")
+        if isinstance(retry_wait_seconds, bool) or retry_wait_seconds < 0:
+            raise ValueError("retry_wait_seconds must be non-negative")
+        if isinstance(timeout_seconds, bool) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        self.api_key = selected_key
+        self.base_url = str(base_url).strip()
+        self.retry_count = retry_count
+        self.retry_wait_seconds = retry_wait_seconds
+        self.timeout_seconds = timeout_seconds
+
+    def fetch(self, request: IndiaMarketRequest) -> IndiaMarketProviderResponse:
+        raise NotImplementedError(
+            "Use fetch_interval(request, interval=...) for Alpha Vantage"
+        )
+
+    def fetch_interval(
+        self,
+        request: IndiaMarketRequest,
+        *,
+        interval: str = "1d",
+    ) -> IndiaMarketProviderResponse:
+        interval = str(interval).strip().lower()
+        if interval not in ("1d", "1min", "5min", "15min", "30min", "60min"):
+            raise ValueError(
+                "interval must be 1d, 1min, 5min, 15min, 30min or 60min"
+            )
+
+        frames: dict[str, pd.DataFrame] = {}
+        action_frames: dict[str, pd.DataFrame] = {}
+        raw_payloads: dict[str, dict[str, Any]] = {}
+        retrieved_at = datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        ).replace("+00:00", "Z")
+
+        for market_symbol in request.symbols:
+            provider_symbol = self._provider_symbol(market_symbol)
+            if interval == "1d":
+                params = {
+                    "function": "TIME_SERIES_DAILY_ADJUSTED",
+                    "symbol": provider_symbol,
+                    "outputsize": "full",
+                }
+                series_name = "Time Series (Daily)"
+                freshness = "historical"
+            else:
+                params = {
+                    "function": "TIME_SERIES_INTRADAY",
+                    "symbol": provider_symbol,
+                    "interval": interval,
+                    "outputsize": "full",
+                }
+                series_name = f"Time Series ({interval})"
+                freshness = "delayed_or_unverified"
+
+            payload = self._request_payload(params)
+            raw_payloads[market_symbol.symbol] = payload
+            series = payload.get(series_name)
+            if not isinstance(series, dict):
+                message = self._provider_error(payload)
+                raise IndiaProviderResponseError(
+                    f"Alpha Vantage returned no usable data for "
+                    f"{market_symbol.symbol}: {message}"
+                )
+
+            frame = self._normalize_series(
+                series,
+                market_symbol=market_symbol,
+                start_date=request.start_date,
+                end_date=request.end_date,
+                intraday=interval != "1d",
+            )
+            frames[market_symbol.symbol] = frame
+            action_frames[market_symbol.symbol] = pd.DataFrame()
+
+        return IndiaMarketProviderResponse(
+            provider="Alpha Vantage",
+            source="Alpha Vantage authenticated API",
+            symbols=request.symbols,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            retrieved_at=retrieved_at,
+            frames=frames,
+            action_frames=action_frames,
+            interval=interval,
+            freshness=freshness,
+            raw_payloads=raw_payloads,
+        )
+
+    @staticmethod
+    def _provider_symbol(market_symbol: IndiaMarketSymbol) -> str:
+        symbol = market_symbol.symbol.upper()
+        if symbol.endswith(".NS"):
+            return symbol[:-3] + ".NSE"
+        if symbol.endswith(".BO"):
+            return symbol[:-3] + ".BSE"
+        if market_symbol.exchange == "BSE":
+            return symbol + ".BSE"
+        return symbol + ".NSE"
+
+    def _request_payload(self, params: dict[str, str]) -> dict[str, Any]:
+        for attempt in range(self.retry_count + 1):
+            try:
+                response = requests.get(
+                    self.base_url,
+                    params={**params, "apikey": self.api_key},
+                    timeout=self.timeout_seconds,
+                )
+            except requests.RequestException as error:
+                if attempt < self.retry_count:
+                    time.sleep(self.retry_wait_seconds)
+                    continue
+                raise IndiaProviderResponseError(
+                    f"Alpha Vantage connection failed ({type(error).__name__})"
+                ) from error
+
+            if response.status_code == 429:
+                if attempt < self.retry_count:
+                    time.sleep(self.retry_wait_seconds)
+                    continue
+                raise IndiaProviderRateLimitError(
+                    "Alpha Vantage returned HTTP 429 rate limit"
+                )
+            if response.status_code in (401, 403):
+                raise IndiaProviderResponseError(
+                    "Alpha Vantage authentication failed"
+                )
+            if response.status_code >= 500:
+                if attempt < self.retry_count:
+                    time.sleep(self.retry_wait_seconds)
+                    continue
+                raise IndiaProviderResponseError(
+                    f"Alpha Vantage server error: HTTP {response.status_code}"
+                )
+            try:
+                payload = response.json()
+            except (ValueError, json.JSONDecodeError) as error:
+                raise IndiaProviderResponseError(
+                    "Alpha Vantage returned a non-JSON response"
+                ) from error
+            if not isinstance(payload, dict):
+                raise IndiaProviderResponseError(
+                    "Alpha Vantage returned an unexpected JSON response"
+                )
+
+            lowered = json.dumps(payload).lower()
+            if "invalid api call" in lowered or "invalid apikey" in lowered:
+                raise IndiaProviderResponseError(
+                    "Alpha Vantage authentication or symbol request failed"
+                )
+            if "rate limit" in lowered or "frequency" in lowered:
+                raise IndiaProviderRateLimitError(
+                    "Alpha Vantage rate limit or call-frequency restriction"
+                )
+            return payload
+        raise IndiaProviderResponseError("Alpha Vantage request exhausted retries")
+
+    @staticmethod
+    def _provider_error(payload: dict[str, Any]) -> str:
+        for key in ("Error Message", "Note", "Information"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return " ".join(value.split())[:300]
+        return "no recognized series or provider error"
+
+    def _normalize_series(
+        self,
+        series: dict[str, Any],
+        *,
+        market_symbol: IndiaMarketSymbol,
+        start_date: date,
+        end_date: date,
+        intraday: bool,
+    ) -> pd.DataFrame:
+        records: list[dict[str, Any]] = []
+        for timestamp_text, values in series.items():
+            if not isinstance(values, dict):
+                continue
+            parsed = pd.to_datetime(timestamp_text, errors="coerce")
+            if pd.isna(parsed):
+                continue
+            if parsed.tzinfo is not None:
+                parsed = parsed.tz_convert("Asia/Kolkata").tz_localize(None)
+            else:
+                parsed = parsed.tz_localize("Asia/Kolkata", nonexistent="shift_forward", ambiguous="NaT").tz_localize(None)
+            if parsed.date() < start_date or parsed.date() > end_date:
+                continue
+            records.append({
+                "_Timestamp": parsed,
+                "Open": values.get("1. open"),
+                "High": values.get("2. high"),
+                "Low": values.get("3. low"),
+                "Close": values.get("4. close"),
+                "Adjusted Close": values.get("5. adjusted close", values.get("4. close")),
+                "Volume": values.get("6. volume"),
+            })
+
+        if not records:
+            raise IndiaProviderResponseError(
+                f"Alpha Vantage returned no records in range for {market_symbol.symbol}"
+            )
+
+        frame = pd.DataFrame(records).sort_values("_Timestamp")
+        normalized = pd.DataFrame({
+            "Date": (
+                frame["_Timestamp"].dt.strftime("%Y-%m-%d")
+                if not intraday
+                else frame["_Timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+            ),
+            "Symbol": market_symbol.symbol,
+            "Open": pd.to_numeric(frame["Open"], errors="coerce"),
+            "High": pd.to_numeric(frame["High"], errors="coerce"),
+            "Low": pd.to_numeric(frame["Low"], errors="coerce"),
+            "Close": pd.to_numeric(frame["Close"], errors="coerce"),
+            "Adjusted Close": pd.to_numeric(frame["Adjusted Close"], errors="coerce"),
+            "Volume": pd.to_numeric(frame["Volume"], errors="coerce"),
+        }).reset_index(drop=True)
+        normalized = _validate_normalized_india_frame(normalized)
+        return normalized
+
+
+def create_india_market_provider(
+    *,
+    provider_name: str | None = None,
+) -> IndiaDailyMarketProvider:
+    """Create an India provider from the configured provider name."""
+    repository_root = Path(__file__).resolve().parents[2]
+    load_dotenv(dotenv_path=repository_root / ".env", override=False)
+    # provider_name is an explicit override; otherwise read only the documented
+    # INDIA_DATA_PROVIDER environment variable.
+    name = str(
+        provider_name
+        if provider_name is not None
+        else os.environ.get("INDIA_DATA_PROVIDER", "yahoo-finance-yfinance")
+    ).strip().lower()
+    if name in ("yahoo-finance-yfinance", "yahoo", "yahoo-finance", "yfinance"):
+        return YahooFinanceIndiaProvider()
+    if name in ("alpha-vantage", "alphavantage", "alpha_vantage"):
+        return AlphaVantageIndiaProvider(
+            api_key=os.environ.get("ALPHA_VANTAGE_API_KEY", ""),
+            base_url=os.environ.get(
+                "INDIA_MARKET_DATA_BASE_URL",
+                "https://www.alphavantage.co/query",
+            )
+        )
+    raise ValueError(
+        "unsupported India market data provider; use yahoo-finance-yfinance "
+        "or alpha-vantage"
+    )
+
+
 def _validate_normalized_india_frame(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         raise IndiaProviderResponseError("provider returned an empty normalized frame")
@@ -320,6 +607,8 @@ def download_india_etf_data(
     output_dir: str | Path = INDIA_DATA_DIR,
     license_status: str | None = None,
     retrieval_timezone: str = "UTC",
+    interval: str = "1d",
+    backfill: bool = False,
 ) -> dict[str, object]:
     """Download, preserve and ingest India ETF CSV data without training readiness assumptions."""
     del retrieval_timezone
@@ -331,6 +620,8 @@ def download_india_etf_data(
     )
     if not normalized_symbols:
         raise ValueError("at least one India symbol is required")
+    if not isinstance(backfill, bool):
+        raise ValueError("backfill must be a boolean")
     start = (
         date.fromisoformat(start_date)
         if isinstance(start_date, str)
@@ -338,8 +629,15 @@ def download_india_etf_data(
     )
     end = date.fromisoformat(end_date) if isinstance(end_date, str) else end_date
     request = IndiaMarketRequest(normalized_symbols, start, end)
-    selected_provider = provider or YahooFinanceIndiaProvider()
-    response = selected_provider.fetch(request)
+    selected_provider = provider or create_india_market_provider()
+    if isinstance(selected_provider, AlphaVantageIndiaProvider):
+        response = selected_provider.fetch_interval(request, interval=interval)
+    else:
+        if interval != "1d":
+            raise ValueError(
+                "The yfinance adapter currently supports daily data only"
+            )
+        response = selected_provider.fetch(request)
 
     output_dir = Path(output_dir)
     raw_dir = output_dir / "raw"
@@ -349,17 +647,68 @@ def download_india_etf_data(
 
     raw_csv_paths: list[Path] = []
     combined_frames: list[pd.DataFrame] = []
+    raw_payload_dir = raw_dir / "provider_json"
+    raw_payload_dir.mkdir(parents=True, exist_ok=True)
     for market_symbol in normalized_symbols:
-        frame = response.frames[market_symbol.symbol]
+        frame = response.frames.get(market_symbol.symbol)
+        if frame is None or frame.empty:
+            continue
+        frame = frame.copy()
+        frame["Timezone"] = "Asia/Kolkata"
+        frame["Provider"] = response.provider
+        frame["Source"] = response.source
+        frame["Retrieved At"] = response.retrieved_at
+        frame["Interval"] = response.interval
+        frame["Data Freshness"] = response.freshness
+        if "Source Timestamp" not in frame.columns:
+            frame["Source Timestamp"] = frame["Date"]
         combined_frames.append(frame)
         filename_symbol = market_symbol.symbol.replace(".", "_")
-        raw_path = raw_dir / f"{filename_symbol}_daily.csv"
-        frame.to_csv(raw_path, index=False, encoding="utf-8")
+        suffix = "daily" if interval == "1d" else interval
+        raw_path = raw_dir / f"{filename_symbol}_{suffix}.csv"
+        if raw_path.exists():
+            existing = pd.read_csv(raw_path)
+            merged = pd.concat([existing, frame], ignore_index=True)
+            merged.drop_duplicates(subset=["Symbol", "Date"], keep="last", inplace=True)
+            merged.sort_values(["Symbol", "Date"], inplace=True)
+            merged.to_csv(raw_path, index=False, encoding="utf-8")
+        else:
+            frame.to_csv(raw_path, index=False, encoding="utf-8")
         raw_csv_paths.append(raw_path)
+        payload = (
+            response.raw_payloads or {}
+        ).get(market_symbol.symbol)
+        if payload is not None:
+            payload_path = raw_payload_dir / f"{filename_symbol}_{suffix}.json"
+            payload_path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False)
+                + "\n",
+                encoding="utf-8",
+            )
 
-    combined = pd.concat(combined_frames, ignore_index=True)
-    combined.sort_values(["Symbol", "Date"], inplace=True)
-    provider_csv = raw_dir / "india_etf_provider_combined.csv"
+    if combined_frames:
+        combined = pd.concat(combined_frames, ignore_index=True)
+        combined.sort_values(["Symbol", "Date"], inplace=True)
+    else:
+        combined = pd.DataFrame(columns=[
+            "Date",
+            "Symbol",
+            "Open",
+            "High",
+            "Low",
+            "Close",
+            "Adjusted Close",
+            "Volume",
+        ])
+    provider_csv = raw_dir / (
+        "india_etf_provider_combined.csv"
+        if interval == "1d"
+        else f"india_etf_provider_{interval}.csv"
+    )
+    if provider_csv.exists():
+        existing = pd.read_csv(provider_csv)
+        combined = pd.concat([existing, combined], ignore_index=True)
+        combined.drop_duplicates(subset=["Symbol", "Date"], keep="last", inplace=True)
     combined.to_csv(provider_csv, index=False, encoding="utf-8")
 
     status = (
@@ -372,21 +721,41 @@ def download_india_etf_data(
         raise ValueError("license_status must be approved or unverified")
 
     provider_name = str(response.provider).strip()
-    config = IndianETFIngestionConfig(
-        symbols=tuple(symbol.symbol for symbol in normalized_symbols),
-        provider=provider_name,
-        retrieval_timestamp=response.retrieved_at,
-        adjustment_methodology=INDIA_ADJUSTMENT_METHOD,
-        license_permission_status=status,
-    )
-    with tempfile.TemporaryDirectory() as temp_dir:
-        ingestion_source = Path(temp_dir) / provider_csv.name
-        ingestion_source.write_bytes(provider_csv.read_bytes())
-        report = ingest_indian_etf_csv(
-            ingestion_source,
-            config,
-            output_dir=output_dir,
+    if interval == "1d":
+        config = IndianETFIngestionConfig(
+            symbols=tuple(symbol.symbol for symbol in normalized_symbols),
+            provider=provider_name,
+            retrieval_timestamp=response.retrieved_at,
+            adjustment_methodology=(
+                "Alpha Vantage adjusted close; raw OHLC and corporate-action "
+                "completeness unverified"
+                if isinstance(selected_provider, AlphaVantageIndiaProvider)
+                else INDIA_ADJUSTMENT_METHOD
+            ),
+            license_permission_status=status,
         )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ingestion_source = Path(temp_dir) / provider_csv.name
+            ingestion_source.write_bytes(provider_csv.read_bytes())
+            report = ingest_indian_etf_csv(
+                ingestion_source,
+                config,
+                output_dir=output_dir,
+            )
+    else:
+        live_dir = output_dir / "live"
+        live_dir.mkdir(parents=True, exist_ok=True)
+        live_csv = live_dir / f"india_etf_{interval}.csv"
+        combined.to_csv(live_csv, index=False, encoding="utf-8")
+        report = {
+            "provider": provider_name,
+            "source": response.source,
+            "symbols": [symbol.symbol for symbol in normalized_symbols],
+            "validation_issues": [],
+            "training_ready": False,
+            "normalized_csv": str(live_csv),
+            "row_count": int(len(combined)),
+        }
     report["source"] = response.source
     report["exchange"] = {
         symbol.symbol: symbol.exchange for symbol in normalized_symbols
@@ -397,7 +766,15 @@ def download_india_etf_data(
     }
     report["provider"] = provider_name
     report["retrieval_timestamp"] = response.retrieved_at
-    report["adjustment_methodology"] = INDIA_ADJUSTMENT_METHOD
+    report["interval"] = response.interval
+    report["timezone"] = "Asia/Kolkata"
+    report["data_freshness"] = response.freshness
+    report["adjustment_methodology"] = (
+        "Alpha Vantage adjusted close; raw OHLC and corporate-action "
+        "completeness unverified"
+        if isinstance(selected_provider, AlphaVantageIndiaProvider)
+        else INDIA_ADJUSTMENT_METHOD
+    )
     report["license_permission_status"] = status
     report["training_ready"] = bool(
         status == "approved"
@@ -405,6 +782,53 @@ def download_india_etf_data(
     )
     report["raw_csv_paths"] = [str(path) for path in raw_csv_paths]
     report["provider_combined_csv"] = str(provider_csv)
+    per_symbol_status: dict[str, dict[str, object]] = {}
+    for market_symbol in normalized_symbols:
+        frame = response.frames.get(market_symbol.symbol)
+        if frame is None or frame.empty:
+            per_symbol_status[market_symbol.symbol] = {
+                "status": "failed",
+                "requested_start_date": start.isoformat(),
+                "requested_end_date": end.isoformat(),
+                "actual_start_date": None,
+                "actual_end_date": None,
+                "row_count": 0,
+                "failure": "provider returned no data",
+            }
+            continue
+        dates = pd.to_datetime(frame["Date"], errors="coerce").dropna()
+        per_symbol_status[market_symbol.symbol] = {
+            "status": (
+                "complete" if len(dates) > 1 else "one_row_or_incomplete"
+            ),
+            "requested_start_date": start.isoformat(),
+            "requested_end_date": end.isoformat(),
+            "actual_start_date": (
+                dates.min().strftime("%Y-%m-%d")
+                if not dates.empty
+                else None
+            ),
+            "actual_end_date": (
+                dates.max().strftime("%Y-%m-%d")
+                if not dates.empty
+                else None
+            ),
+            "row_count": int(len(frame)),
+            "failure": None,
+        }
+    report["feed_mode"] = "backfill" if backfill else "incremental"
+    report["backfill"] = bool(backfill)
+    report["per_symbol_status"] = per_symbol_status
+    report["failed_symbols"] = sorted(
+        symbol
+        for symbol, status in per_symbol_status.items()
+        if status["status"] == "failed"
+    )
+    report["one_row_symbols"] = sorted(
+        symbol
+        for symbol, status in per_symbol_status.items()
+        if status["status"] == "one_row_or_incomplete"
+    )
     report["corporate_actions"] = {
         symbol.symbol: {
             "verified": False,

@@ -1,0 +1,14 @@
+{
+  "mapping_version": "1.0",
+  "mapping_source": "owner-maintained explicit metadata; not a live sector classification service",
+  "sectors": {
+    "RELIANCE.NS": {
+      "sector": "Energy",
+      "industry": "Oil, Gas and Consumable Fuels"
+    },
+    "TCS.NS": {
+      "sector": "Information Technology",
+      "industry": "IT Services"
+    }
+  }
+}

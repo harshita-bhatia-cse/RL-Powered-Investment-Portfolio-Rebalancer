@@ -6,6 +6,16 @@ from .asset_analysis import analyze_assets
 from .correlation_service import analyze_correlations
 from .allocation_service import validate_weights, allocation_summary
 from .benchmark_service import compare_benchmarks
+from .india_market_analysis import analyze_india_market, calculate_indicators, build_stock_summary
+from .india_sector_intelligence import (
+    analyze_india_sector_intelligence,
+    calculate_sector_intelligence,
+    load_sector_metadata,
+)
+from .india_unified_intelligence import (
+    analyze_unified_india_intelligence,
+    build_unified_india_intelligence,
+)
 
 __all__ = [
     "calculate_portfolio_metrics",
@@ -16,4 +26,12 @@ __all__ = [
     "validate_weights",
     "allocation_summary",
     "compare_benchmarks",
+    "analyze_india_market",
+    "calculate_indicators",
+    "build_stock_summary",
+    "analyze_india_sector_intelligence",
+    "calculate_sector_intelligence",
+    "load_sector_metadata",
+    "analyze_unified_india_intelligence",
+    "build_unified_india_intelligence",
 ]

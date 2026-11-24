@@ -8,7 +8,7 @@ Centralized configuration management using Pydantic settings.
 import os
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from pydantic import validator
+from pydantic import Field, validator
 from pydantic_settings import BaseSettings
 from pydantic.types import SecretStr
 from dotenv import load_dotenv
@@ -57,6 +57,51 @@ class FMPSettings(BaseSettings):
 
     class Config:
         env_prefix = "FMP_"
+
+
+class IndiaMarketDataSettings(BaseSettings):
+    """Configuration for the India market-data provider adapters."""
+    provider: str = Field(
+        default="yahoo-finance-yfinance",
+        validation_alias="INDIA_DATA_PROVIDER",
+    )
+    symbols: str = Field(default="", validation_alias="INDIA_DATA_SYMBOLS")
+    interval: str = Field(default="1d", validation_alias="INDIA_DATA_INTERVAL")
+    refresh_seconds: int = Field(
+        default=0,
+        validation_alias="INDIA_DATA_REFRESH_SECONDS",
+    )
+    start_date: Optional[str] = Field(
+        default=None,
+        validation_alias="INDIA_DATA_START_DATE",
+    )
+    end_date: Optional[str] = Field(
+        default=None,
+        validation_alias="INDIA_DATA_END_DATE",
+    )
+    backfill: bool = Field(
+        default=False,
+        validation_alias="INDIA_DATA_BACKFILL",
+    )
+    base_url: str = Field(
+        default="https://www.alphavantage.co/query",
+        validation_alias="INDIA_MARKET_DATA_BASE_URL",
+    )
+    license_status: str = Field(
+        default="unverified",
+        validation_alias="INDIA_DATA_LICENSE_STATUS",
+    )
+    use_stock_universe: bool = Field(
+        default=False,
+        validation_alias="INDIA_USE_STOCK_UNIVERSE",
+    )
+    universe_sector: Optional[str] = Field(
+        default=None,
+        validation_alias="INDIA_STOCK_UNIVERSE_SECTOR",
+    )
+
+    class Config:
+        env_prefix = "INDIA_"
 
 
 class OpenAISettings(BaseSettings):
@@ -158,6 +203,7 @@ class FinRLSettings(BaseSettings):
     alpaca: AlpacaSettings = AlpacaSettings()
     wrds: WRDSSettings = WRDSSettings()
     fmp: FMPSettings = FMPSettings()
+    india_market_data: IndiaMarketDataSettings = IndiaMarketDataSettings()
     openai: OpenAISettings = OpenAISettings()
     data: DataSettings = DataSettings()
     strategy: StrategySettings = StrategySettings()
