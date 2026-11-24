@@ -1,3 +1,4 @@
+import csv
 import hashlib
 import json
 import os
@@ -18,11 +19,17 @@ from src.backtest.historical_service import (
     CorporateActionSourceValidationError,
     validate_issuer_verified_corporate_action_source,
 )
+from src.data.corporate_action_provider import (
+    EVENT_COLUMNS,
+    CorporateActionValidationError,
+    load_normalized_events,
+)
 from src.rl.environment.portfolio_env import (
     MARKET_SYMBOLS,
     PortfolioTradingEnv,
     fit_training_scaler,
 )
+from src.strategies.allocation import CorporateActionEvent, CorporateActionType
 
 FIXTURE_DATES = pd.bdate_range("2017-01-03", "2026-11-11")
 
@@ -230,6 +237,7 @@ class HistoricalCorporateActionSourceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
+        self.market = build_market_fixture()
 
     def tearDown(self):
         self.temp.cleanup()
@@ -271,6 +279,18 @@ class HistoricalCorporateActionSourceTests(unittest.TestCase):
         }
         (self.root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         return artifact, manifest
+
+    def write_event_source(self, rows):
+        artifact, manifest = self.write_source()
+        with artifact.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(EVENT_COLUMNS)
+            writer.writerows(rows)
+        artifact_info = manifest["artifacts"]["verified_normalized_events.csv"]
+        artifact_info["sha256"] = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        artifact_info["bytes"] = artifact.stat().st_size
+        (self.root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        return artifact
 
     def test_default_configuration_is_disabled_without_environment_variable(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -315,7 +335,9 @@ class HistoricalCorporateActionSourceTests(unittest.TestCase):
 
         with patch(
             "src.backtest.historical_service.load_market_data"
-        ) as load_market_data:
+        ) as load_market_data, patch(
+            "src.backtest.historical_service.load_normalized_events"
+        ) as load_events:
             with self.assertRaisesRegex(
                 CorporateActionSourceValidationError,
                 "Expected the issuer workflow artifact",
@@ -323,6 +345,128 @@ class HistoricalCorporateActionSourceTests(unittest.TestCase):
                 service._load_context()
 
         load_market_data.assert_not_called()
+        load_events.assert_not_called()
+
+    def test_unconfigured_source_does_not_load_events(self):
+        with patch.dict(os.environ, {HISTORICAL_VERIFIED_CORPORATE_ACTIONS_ENV: ""}):
+            service = HistoricalBacktestService()
+        with patch(
+            "src.backtest.historical_service.load_market_data",
+            return_value=self.market,
+        ), patch(
+            "src.backtest.historical_service.load_normalized_events"
+        ) as load_events:
+            _, _, events = service._load_context()
+
+        self.assertEqual(events, ())
+        load_events.assert_not_called()
+
+    def test_configured_source_loads_events_with_manifest_bounds_and_full_calendar(
+        self,
+    ):
+        artifact = self.write_event_source(
+            [
+                (
+                    "SPY",
+                    "cash_dividend",
+                    "training-event",
+                    "USD",
+                    "2020-06-01",
+                    "2020-06-15",
+                    "2020-06-30",
+                    "",
+                    "0.5",
+                    "",
+                ),
+                (
+                    "QQQ",
+                    "etf_distribution",
+                    "test-event",
+                    "USD",
+                    "2024-06-03",
+                    "2024-06-17",
+                    "2024-06-28",
+                    "",
+                    "0.7",
+                    "",
+                ),
+            ]
+        )
+        service = HistoricalBacktestService(corporate_action_events_path=artifact)
+
+        with patch(
+            "src.backtest.historical_service.load_market_data",
+            return_value=self.market,
+        ), patch(
+            "src.backtest.historical_service.load_normalized_events",
+            wraps=load_normalized_events,
+        ) as load_events:
+            _, _, events = service._load_context()
+
+        self.assertEqual(
+            events,
+            (
+                CorporateActionEvent(
+                    symbol="SPY",
+                    event_type=CorporateActionType.CASH_DIVIDEND,
+                    source_id="training-event",
+                    announcement_date="2020-06-01",
+                    ex_date="2020-06-15",
+                    payment_date="2020-06-30",
+                    distribution_per_share=0.5,
+                ),
+                CorporateActionEvent(
+                    symbol="QQQ",
+                    event_type=CorporateActionType.ETF_DISTRIBUTION,
+                    source_id="test-event",
+                    announcement_date="2024-06-03",
+                    ex_date="2024-06-17",
+                    payment_date="2024-06-28",
+                    distribution_per_share=0.7,
+                ),
+            ),
+        )
+        load_events.assert_called_once()
+        loader_kwargs = load_events.call_args.kwargs
+        self.assertEqual(loader_kwargs["start_date"], "2018-01-03")
+        self.assertEqual(loader_kwargs["end_date"], "2026-11-11")
+        self.assertTrue(
+            loader_kwargs["market_sessions"].equals(self.market["SPY"].index)
+        )
+        self.assertEqual(
+            loader_kwargs["market_sessions"][0], self.market["SPY"].index[0]
+        )
+        self.assertEqual(
+            loader_kwargs["market_sessions"][-1], self.market["SPY"].index[-1]
+        )
+
+    def test_invalid_event_data_raises_loader_validation_error(self):
+        artifact = self.write_event_source(
+            [
+                (
+                    "SPY",
+                    "cash_dividend",
+                    "weekend-event",
+                    "USD",
+                    "2021-06-01",
+                    "2021-06-19",
+                    "2021-06-30",
+                    "",
+                    "0.5",
+                    "",
+                )
+            ]
+        )
+        service = HistoricalBacktestService(corporate_action_events_path=artifact)
+
+        with patch(
+            "src.backtest.historical_service.load_market_data",
+            return_value=self.market,
+        ):
+            with self.assertRaisesRegex(
+                CorporateActionValidationError, "does not align"
+            ):
+                service._load_context()
 
     def test_missing_manifest_is_rejected(self):
         artifact, _ = self.write_source()

@@ -19,13 +19,16 @@ from src.backtest.historical_strategies import (
     HistoricalStrategy,
     create_strategy,
 )
+from src.data.corporate_action_provider import load_normalized_events
 from src.rl.environment.portfolio_env import (
+    BENCHMARK_SYMBOL,
     PARTITION_BOUNDS,
     PortfolioTradingEnv,
     TrainOnlyFeatureScaler,
     fit_training_scaler,
     load_market_data,
 )
+from src.strategies.allocation import CorporateActionEvent
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HISTORICAL_DATA_DIR = PROJECT_ROOT / "data" / "historical_market_csv"
@@ -220,7 +223,7 @@ class HistoricalBacktestService:
         self._validate_capital(initial_capital)
         self._validate_partition(partition)
         strategy = self._make_strategy(strategy_name, parameters)
-        market_data, scaler = self._load_context()
+        market_data, scaler, _ = self._load_context()
         return self._run_with_context(
             strategy,
             market_data=market_data,
@@ -256,7 +259,7 @@ class HistoricalBacktestService:
                 + ", ".join(sorted(unknown_parameter_names))
             )
 
-        market_data, scaler = self._load_context()
+        market_data, scaler, _ = self._load_context()
         results = [
             self._run_with_context(
                 strategy,
@@ -276,7 +279,7 @@ class HistoricalBacktestService:
     def health(self) -> dict[str, Any]:
         """Validate all partition boundaries and finite environment observations."""
         try:
-            market_data, scaler = self._load_context()
+            market_data, scaler, _ = self._load_context()
             partitions: dict[str, dict[str, Any]] = {}
             for name in PARTITION_BOUNDS:
                 env = self._build_env(
@@ -317,10 +320,20 @@ class HistoricalBacktestService:
                 ),
             }
 
-    def _load_context(self) -> tuple[dict[str, pd.DataFrame], TrainOnlyFeatureScaler]:
+    def _load_context(
+        self,
+    ) -> tuple[
+        dict[str, pd.DataFrame],
+        TrainOnlyFeatureScaler,
+        tuple[CorporateActionEvent, ...],
+    ]:
+        verified_source = None
         if self.corporate_action_events_path is not None:
-            validate_issuer_verified_corporate_action_source(
-                self.corporate_action_events_path
+            verified_source = (
+                self.corporate_action_events_path,
+                validate_issuer_verified_corporate_action_source(
+                    self.corporate_action_events_path
+                ),
             )
         try:
             market_data = load_market_data(self.data_dir)
@@ -329,7 +342,33 @@ class HistoricalBacktestService:
             raise HistoricalDataUnavailableError(
                 f"Historical CSV data is unavailable or invalid: {exc}"
             ) from exc
-        return market_data, scaler
+        corporate_action_events = (
+            self._load_corporate_action_events(market_data, *verified_source)
+            if verified_source is not None
+            else ()
+        )
+        return market_data, scaler, corporate_action_events
+
+    def _load_corporate_action_events(
+        self,
+        market_data: dict[str, pd.DataFrame],
+        events_path: Path,
+        manifest: dict[str, Any],
+    ) -> tuple[CorporateActionEvent, ...]:
+        """Load validated events against manifest bounds and the full market calendar."""
+        date_range = manifest["date_range"]
+        common_start = max(frame.index.min() for frame in market_data.values())
+        common_end = min(frame.index.max() for frame in market_data.values())
+        benchmark_dates = pd.DatetimeIndex(market_data[BENCHMARK_SYMBOL].index)
+        market_sessions = benchmark_dates[
+            (benchmark_dates >= common_start) & (benchmark_dates <= common_end)
+        ]
+        return load_normalized_events(
+            events_path,
+            start_date=date_range["start"],
+            end_date=date_range["end"],
+            market_sessions=market_sessions,
+        )
 
     def _build_env(
         self,
