@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import os
+from datetime import date
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -25,6 +29,16 @@ from src.rl.environment.portfolio_env import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HISTORICAL_DATA_DIR = PROJECT_ROOT / "data" / "historical_market_csv"
+HISTORICAL_VERIFIED_CORPORATE_ACTIONS_ENV = "HISTORICAL_VERIFIED_CORPORATE_ACTIONS_CSV"
+ISSUER_VERIFIED_EVENTS_FILENAME = "verified_normalized_events.csv"
+ISSUER_VERIFICATION_MANIFEST_FILENAME = "manifest.json"
+ISSUER_VERIFICATION_PROVIDER = (
+    "State Street Global Advisors; Yahoo candidates used only for comparison"
+)
+ISSUER_VERIFICATION_SOURCE_WORKBOOK_URL = (
+    "https://www.ssga.com/us/en/intermediary/library-content/products/fund-data/"
+    "etfs/us/spdr-etf-historical-distributions.xlsx"
+)
 
 
 class HistoricalDataUnavailableError(RuntimeError):
@@ -35,12 +49,163 @@ class UnsupportedStrategyError(ValueError):
     """Raised for unknown strategies or unsupported strategy parameters."""
 
 
+class CorporateActionSourceValidationError(ValueError):
+    """Raised when a configured issuer-verified event artifact cannot be validated."""
+
+
+def validate_issuer_verified_corporate_action_source(
+    events_path: str | Path,
+) -> dict[str, Any]:
+    """Validate issuer-workflow provenance and artifact integrity without loading events.
+
+    The manifest checksum is provenance evidence only; it is not a digital
+    signature and does not establish cryptographic authenticity.
+    """
+    path = Path(events_path)
+    if path.name != ISSUER_VERIFIED_EVENTS_FILENAME:
+        raise CorporateActionSourceValidationError(
+            "Expected the issuer workflow artifact "
+            f"{ISSUER_VERIFIED_EVENTS_FILENAME!r}; Yahoo candidates, verification "
+            "templates, and arbitrary normalized CSVs are not verified sources."
+        )
+    if not path.is_file():
+        raise CorporateActionSourceValidationError(
+            f"Configured issuer-verified event CSV does not exist: {path}"
+        )
+
+    manifest_path = path.parent / ISSUER_VERIFICATION_MANIFEST_FILENAME
+    if not manifest_path.is_file():
+        raise CorporateActionSourceValidationError(
+            f"Required adjacent issuer verification manifest is missing: "
+            f"{manifest_path}"
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise CorporateActionSourceValidationError(
+            f"Issuer verification manifest is unreadable or malformed: "
+            f"{manifest_path}"
+        ) from exc
+    if not isinstance(manifest, dict):
+        raise CorporateActionSourceValidationError(
+            "Issuer verification manifest must contain a JSON object."
+        )
+    if manifest.get("provider") != ISSUER_VERIFICATION_PROVIDER:
+        raise CorporateActionSourceValidationError(
+            "Unsupported issuer verification provider/workflow identity in "
+            f"{manifest_path}."
+        )
+    if manifest.get("source_workbook_url") != ISSUER_VERIFICATION_SOURCE_WORKBOOK_URL:
+        raise CorporateActionSourceValidationError(
+            "Issuer verification manifest has an unsupported source_workbook_url."
+        )
+
+    date_range = manifest.get("date_range")
+    if not isinstance(date_range, dict):
+        raise CorporateActionSourceValidationError(
+            "Issuer verification manifest must include a date_range object."
+        )
+    date_values: dict[str, date] = {}
+    for field in ("start", "end"):
+        value = date_range.get(field)
+        if not isinstance(value, str):
+            raise CorporateActionSourceValidationError(
+                f"Issuer verification manifest date_range.{field} must be an "
+                "ISO-format date (YYYY-MM-DD)."
+            )
+        try:
+            parsed_date = date.fromisoformat(value)
+        except ValueError as exc:
+            raise CorporateActionSourceValidationError(
+                f"Issuer verification manifest date_range.{field} must be a "
+                "valid ISO-format date (YYYY-MM-DD)."
+            ) from exc
+        if parsed_date.isoformat() != value:
+            raise CorporateActionSourceValidationError(
+                f"Issuer verification manifest date_range.{field} must use "
+                "ISO format YYYY-MM-DD."
+            )
+        date_values[field] = parsed_date
+    if date_values["start"] > date_values["end"]:
+        raise CorporateActionSourceValidationError(
+            "Issuer verification manifest date_range.start must not be after end."
+        )
+
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise CorporateActionSourceValidationError(
+            "Issuer verification manifest must include an artifacts object."
+        )
+    artifact = artifacts.get(ISSUER_VERIFIED_EVENTS_FILENAME)
+    if not isinstance(artifact, dict):
+        raise CorporateActionSourceValidationError(
+            "Issuer verification manifest does not declare "
+            f"{ISSUER_VERIFIED_EVENTS_FILENAME!r} in artifacts."
+        )
+    declared_bytes = artifact.get("bytes")
+    if (
+        isinstance(declared_bytes, bool)
+        or not isinstance(declared_bytes, int)
+        or declared_bytes < 0
+    ):
+        raise CorporateActionSourceValidationError(
+            "Issuer verification artifact bytes must be a non-negative integer."
+        )
+    try:
+        actual_bytes = path.stat().st_size
+    except OSError as exc:
+        raise CorporateActionSourceValidationError(
+            f"Unable to inspect configured issuer-verified event CSV: {path}"
+        ) from exc
+    if actual_bytes != declared_bytes:
+        raise CorporateActionSourceValidationError(
+            f"Byte-size mismatch for {path.name}: manifest declares "
+            f"{declared_bytes} bytes but file contains {actual_bytes} bytes."
+        )
+
+    declared_sha256 = artifact.get("sha256")
+    if (
+        not isinstance(declared_sha256, str)
+        or len(declared_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in declared_sha256)
+    ):
+        raise CorporateActionSourceValidationError(
+            "Issuer verification artifact sha256 must be a 64-character "
+            "lowercase hexadecimal digest."
+        )
+    try:
+        actual_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise CorporateActionSourceValidationError(
+            f"Unable to read configured issuer-verified event CSV: {path}"
+        ) from exc
+    if actual_sha256 != declared_sha256:
+        raise CorporateActionSourceValidationError(
+            f"SHA-256 checksum mismatch for {path.name}; regenerate or restore "
+            "the issuer verification artifact and adjacent manifest together."
+        )
+
+    return manifest
+
+
 class HistoricalBacktestService:
     """Load historical CSV data and run deterministic environment strategies."""
 
-    def __init__(self, data_dir: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        data_dir: str | Path | None = None,
+        corporate_action_events_path: str | Path | None = None,
+    ) -> None:
         self.data_dir = (
             Path(data_dir) if data_dir is not None else DEFAULT_HISTORICAL_DATA_DIR
+        )
+        configured_events_path = (
+            corporate_action_events_path
+            if corporate_action_events_path is not None
+            else os.environ.get(HISTORICAL_VERIFIED_CORPORATE_ACTIONS_ENV)
+        )
+        self.corporate_action_events_path = (
+            Path(configured_events_path) if configured_events_path else None
         )
 
     def run(
@@ -153,6 +318,10 @@ class HistoricalBacktestService:
             }
 
     def _load_context(self) -> tuple[dict[str, pd.DataFrame], TrainOnlyFeatureScaler]:
+        if self.corporate_action_events_path is not None:
+            validate_issuer_verified_corporate_action_source(
+                self.corporate_action_events_path
+            )
         try:
             market_data = load_market_data(self.data_dir)
             scaler = fit_training_scaler(market_data)

@@ -1,4 +1,9 @@
+import hashlib
+import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -6,9 +11,12 @@ import pandas as pd
 
 from src.backtest.historical_metrics import calculate_historical_metrics
 from src.backtest.historical_service import (
+    HISTORICAL_VERIFIED_CORPORATE_ACTIONS_ENV,
     HistoricalBacktestService,
     HistoricalDataUnavailableError,
     UnsupportedStrategyError,
+    CorporateActionSourceValidationError,
+    validate_issuer_verified_corporate_action_source,
 )
 from src.rl.environment.portfolio_env import (
     MARKET_SYMBOLS,
@@ -216,6 +224,215 @@ class HistoricalBacktestServiceTests(unittest.TestCase):
                 partition="test",
                 parameters={"lookback": 20},
             )
+
+
+class HistoricalCorporateActionSourceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def write_source(
+        self,
+        *,
+        filename="verified_normalized_events.csv",
+        provider=(
+            "State Street Global Advisors; Yahoo candidates used only for comparison"
+        ),
+        source_workbook_url=(
+            "https://www.ssga.com/us/en/intermediary/library-content/products/"
+            "fund-data/etfs/us/spdr-etf-historical-distributions.xlsx"
+        ),
+        declared_filename=None,
+        declared_sha256=None,
+    ):
+        artifact = self.root / filename
+        artifact.write_bytes(b"fixture artifact bytes\n")
+        artifact_name = declared_filename or filename
+        checksum = declared_sha256 or hashlib.sha256(artifact.read_bytes()).hexdigest()
+        manifest = {
+            "provider": provider,
+            "source_workbook_url": source_workbook_url,
+            "retrieved_at": "2026-11-24T00:00:00+00:00",
+            "requested_symbols": ["SPY", "QQQ", "IEF", "GLD", "XLU", "XLV"],
+            "date_range": {"start": "2018-01-03", "end": "2026-11-11"},
+            "issuer_workbook": {
+                "preserved_as": "evidence/ssga_spdr_historical_distributions.xlsx",
+                "sha256": "0" * 64,
+                "worksheet": "dividend",
+            },
+            "counts": {"issuer_verified_normalized_events": 0},
+            "artifacts": {
+                artifact_name: {"sha256": checksum, "bytes": artifact.stat().st_size}
+            },
+            "limitations": ["Issuer event coverage is incomplete for QQQ and IEF."],
+        }
+        (self.root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        return artifact, manifest
+
+    def test_default_configuration_is_disabled_without_environment_variable(self):
+        with patch.dict(os.environ, {}, clear=True):
+            service = HistoricalBacktestService(data_dir="custom-market-data")
+
+        self.assertEqual(service.data_dir, Path("custom-market-data"))
+        self.assertIsNone(service.corporate_action_events_path)
+
+    def test_explicit_constructor_path_takes_precedence_over_environment(self):
+        with patch.dict(
+            os.environ,
+            {HISTORICAL_VERIFIED_CORPORATE_ACTIONS_ENV: str(self.root / "env.csv")},
+        ):
+            service = HistoricalBacktestService(
+                corporate_action_events_path=self.root / "explicit.csv"
+            )
+
+        self.assertEqual(
+            service.corporate_action_events_path, self.root / "explicit.csv"
+        )
+
+    def test_environment_variable_configures_source_when_constructor_omits_it(self):
+        configured_path = self.root / "verified_normalized_events.csv"
+        with patch.dict(
+            os.environ,
+            {HISTORICAL_VERIFIED_CORPORATE_ACTIONS_ENV: str(configured_path)},
+        ):
+            service = HistoricalBacktestService()
+
+        self.assertEqual(service.corporate_action_events_path, configured_path)
+
+    def test_valid_issuer_workflow_manifest_and_artifact_are_accepted(self):
+        artifact, expected_manifest = self.write_source()
+
+        actual_manifest = validate_issuer_verified_corporate_action_source(artifact)
+
+        self.assertEqual(actual_manifest, expected_manifest)
+
+    def test_configured_source_is_validated_before_market_data_loading(self):
+        artifact, _ = self.write_source(filename="yahoo_action_candidates.csv")
+        service = HistoricalBacktestService(corporate_action_events_path=artifact)
+
+        with patch(
+            "src.backtest.historical_service.load_market_data"
+        ) as load_market_data:
+            with self.assertRaisesRegex(
+                CorporateActionSourceValidationError,
+                "Expected the issuer workflow artifact",
+            ):
+                service._load_context()
+
+        load_market_data.assert_not_called()
+
+    def test_missing_manifest_is_rejected(self):
+        artifact, _ = self.write_source()
+        (self.root / "manifest.json").unlink()
+
+        with self.assertRaisesRegex(
+            CorporateActionSourceValidationError, "manifest is missing"
+        ):
+            validate_issuer_verified_corporate_action_source(artifact)
+
+    def test_malformed_manifest_is_rejected(self):
+        artifact, _ = self.write_source()
+        (self.root / "manifest.json").write_text("{not-json", encoding="utf-8")
+
+        with self.assertRaisesRegex(CorporateActionSourceValidationError, "malformed"):
+            validate_issuer_verified_corporate_action_source(artifact)
+
+    def test_missing_or_malformed_manifest_date_ranges_are_rejected(self):
+        invalid_ranges = (
+            (None, "date_range object"),
+            ({}, "date_range.start"),
+            ({"start": "2018-01-03"}, "date_range.end"),
+            (
+                {"start": "2018-1-3", "end": "2026-11-11"},
+                "date_range.start",
+            ),
+            (
+                {"start": "2018-02-30", "end": "2026-11-11"},
+                "valid ISO-format date",
+            ),
+            (
+                {"start": "2026-11-12", "end": "2026-11-11"},
+                "must not be after",
+            ),
+        )
+        for date_range, expected_error in invalid_ranges:
+            with self.subTest(date_range=date_range):
+                artifact, manifest = self.write_source()
+                if date_range is None:
+                    manifest.pop("date_range")
+                else:
+                    manifest["date_range"] = date_range
+                (self.root / "manifest.json").write_text(
+                    json.dumps(manifest), encoding="utf-8"
+                )
+
+                with self.assertRaisesRegex(
+                    CorporateActionSourceValidationError,
+                    expected_error,
+                ):
+                    validate_issuer_verified_corporate_action_source(artifact)
+
+    def test_incorrect_artifact_byte_size_is_rejected(self):
+        artifact, manifest = self.write_source()
+        manifest["artifacts"]["verified_normalized_events.csv"]["bytes"] += 1
+        (self.root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            CorporateActionSourceValidationError, "Byte-size mismatch"
+        ):
+            validate_issuer_verified_corporate_action_source(artifact)
+
+    def test_unsupported_provider_or_workbook_identity_is_rejected(self):
+        for manifest_change, expected_error in (
+            ({"provider": "Yahoo Finance"}, "Unsupported issuer verification"),
+            (
+                {"source_workbook_url": "https://example.invalid/events.xlsx"},
+                "unsupported source_workbook_url",
+            ),
+        ):
+            with self.subTest(manifest_change=manifest_change):
+                artifact, manifest = self.write_source()
+                manifest.update(manifest_change)
+                (self.root / "manifest.json").write_text(
+                    json.dumps(manifest), encoding="utf-8"
+                )
+
+                with self.assertRaisesRegex(
+                    CorporateActionSourceValidationError,
+                    expected_error,
+                ):
+                    validate_issuer_verified_corporate_action_source(artifact)
+
+    def test_wrong_artifact_filename_or_undeclared_artifact_is_rejected(self):
+        for filename in (
+            "yahoo_action_candidates.csv",
+            "issuer_verification_template.csv",
+            "arbitrary_events.csv",
+        ):
+            with self.subTest(filename=filename):
+                artifact, _ = self.write_source(filename=filename)
+                with self.assertRaisesRegex(
+                    CorporateActionSourceValidationError,
+                    "Expected the issuer workflow artifact",
+                ):
+                    validate_issuer_verified_corporate_action_source(artifact)
+
+        artifact, _ = self.write_source(declared_filename="yahoo_action_candidates.csv")
+        with self.assertRaisesRegex(
+            CorporateActionSourceValidationError, "does not declare"
+        ):
+            validate_issuer_verified_corporate_action_source(artifact)
+
+    def test_sha256_checksum_mismatch_is_rejected(self):
+        artifact, _ = self.write_source(declared_sha256="0" * 64)
+
+        with self.assertRaisesRegex(
+            CorporateActionSourceValidationError, "SHA-256 checksum mismatch"
+        ):
+            validate_issuer_verified_corporate_action_source(artifact)
 
 
 if __name__ == "__main__":
