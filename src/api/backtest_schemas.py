@@ -70,6 +70,18 @@ class TransactionCostSummary(BaseModel):
     total_transaction_cost: float
 
 
+class CorporateActionSourceMetadata(BaseModel):
+    """Manifest provenance for the normalized event artifact used in a run."""
+
+    provider: str
+    source_workbook_url: str
+    artifact_filename: str
+    sha256: str
+    bytes: int
+    date_range: dict[str, str]
+    limitations: list[str] = Field(default_factory=list)
+
+
 class HistoricalBacktestResponse(BaseModel):
     strategy: str
     partition: BacktestPartition
@@ -86,6 +98,17 @@ class HistoricalBacktestResponse(BaseModel):
     corporate_action_limitation: str | None
     return_accuracy: str
     warnings: list[str]
+    corporate_action_source_configured: bool = False
+    corporate_action_source_validated: bool = False
+    corporate_action_source: CorporateActionSourceMetadata | None = None
+    corporate_action_events_loaded: int = Field(
+        default=0,
+        description="Total normalized events loaded from the validated artifact.",
+    )
+    corporate_action_events_for_partition: int = Field(
+        default=0,
+        description="Partition-filtered events passed to this environment.",
+    )
 
 
 class HistoricalComparisonResponse(BaseModel):
@@ -106,3 +129,12 @@ class HistoricalBacktestHealthResponse(BaseModel):
     supported_strategies: list[str]
     corporate_actions_verified: bool
     limitation: str
+    corporate_action_source_configured: bool = False
+    corporate_action_source_validated: bool = False
+    corporate_action_events_load_succeeded: bool = False
+    corporate_action_source: CorporateActionSourceMetadata | None = None
+    corporate_action_events_loaded: int = 0
+    corporate_action_partition_event_counts: dict[str, int] = Field(
+        default_factory=dict,
+        description="Partition-filtered events passed to each environment.",
+    )

@@ -149,6 +149,11 @@ class HistoricalBacktestServiceTests(unittest.TestCase):
             np.isfinite([point["value"] for point in result["daily_returns"]]).all()
         )
         self.assertFalse(result["corporate_actions_verified"])
+        self.assertFalse(result["corporate_action_source_configured"])
+        self.assertFalse(result["corporate_action_source_validated"])
+        self.assertIsNone(result["corporate_action_source"])
+        self.assertEqual(result["corporate_action_events_loaded"], 0)
+        self.assertEqual(result["corporate_action_events_for_partition"], 0)
         self.assertTrue(result["warnings"])
         self.assertIn("defaults transaction fees", " ".join(result["warnings"]))
         self.assertEqual(result["metrics"]["initial_portfolio_value"], 25_000.0)
@@ -219,6 +224,16 @@ class HistoricalBacktestServiceTests(unittest.TestCase):
                 for item in result["results"]
             )
         )
+        self.assertTrue(
+            all(
+                item["corporate_action_source_configured"] is False
+                and item["corporate_action_source_validated"] is False
+                and item["corporate_action_source"] is None
+                and item["corporate_action_events_loaded"] == 0
+                and item["corporate_action_events_for_partition"] == 0
+                for item in result["results"]
+            )
+        )
         self.assertEqual(
             result["results"][0]["number_of_trading_sessions"],
             result["results"][1]["number_of_trading_sessions"],
@@ -231,6 +246,146 @@ class HistoricalBacktestServiceTests(unittest.TestCase):
                 partition="test",
                 parameters={"lookback": 20},
             )
+
+    @staticmethod
+    def make_distribution_event(source_id, ex_date, payment_date):
+        return CorporateActionEvent(
+            symbol="SPY",
+            event_type=CorporateActionType.CASH_DIVIDEND,
+            source_id=source_id,
+            announcement_date=ex_date,
+            ex_date=ex_date,
+            payment_date=payment_date,
+            distribution_per_share=1.0,
+        )
+
+    def test_partition_envs_receive_only_their_events_without_mutating_full_history(
+        self,
+    ):
+        events = (
+            self.make_distribution_event("training-action", "2018-01-04", "2018-01-10"),
+            self.make_distribution_event(
+                "validation-action", "2022-01-04", "2022-01-10"
+            ),
+            self.make_distribution_event("test-action", "2023-01-04", "2023-01-10"),
+        )
+        original_events = events
+        scaler = fit_training_scaler(self.market)
+
+        for partition, expected_id in (
+            ("train", "training-action"),
+            ("validation", "validation-action"),
+            ("test", "test-action"),
+        ):
+            with self.subTest(partition=partition):
+                env = self.service._build_env(
+                    self.market,
+                    scaler,
+                    partition=partition,
+                    initial_capital=10_000.0,
+                    corporate_action_events=events,
+                )
+                self.assertEqual(
+                    tuple(event.source_id for event in env._events), (expected_id,)
+                )
+
+        self.assertIs(events, original_events)
+        self.assertEqual(len(events), 3)
+        self.assertEqual(
+            tuple(event.source_id for event in events),
+            ("training-action", "validation-action", "test-action"),
+        )
+
+    def test_split_partition_selection_uses_effective_action_date(self):
+        split_event = CorporateActionEvent(
+            symbol="SPY",
+            event_type=CorporateActionType.SPLIT,
+            source_id="validation-split",
+            announcement_date="2018-01-03",
+            effective_date="2022-06-15",
+            split_ratio=2.0,
+        )
+        events = (split_event,)
+        scaler = fit_training_scaler(self.market)
+
+        validation_env = self.service._build_env(
+            self.market,
+            scaler,
+            partition="validation",
+            initial_capital=10_000.0,
+            corporate_action_events=events,
+        )
+        training_env = self.service._build_env(
+            self.market,
+            scaler,
+            partition="train",
+            initial_capital=10_000.0,
+            corporate_action_events=events,
+        )
+        test_env = self.service._build_env(
+            self.market,
+            scaler,
+            partition="test",
+            initial_capital=10_000.0,
+            corporate_action_events=events,
+        )
+
+        self.assertIsNone(split_event.ex_date)
+        self.assertEqual(split_event.action_date.isoformat(), "2022-06-15")
+        self.assertEqual(validation_env._events, (split_event,))
+        self.assertEqual(training_env._events, ())
+        self.assertEqual(test_env._events, ())
+
+    def test_non_session_action_in_partition_is_rejected(self):
+        weekend_event = self.make_distribution_event(
+            "weekend-action", "2022-01-08", "2022-01-12"
+        )
+
+        with self.assertRaisesRegex(CorporateActionValidationError, "does not align"):
+            self.service._build_env(
+                self.market,
+                fit_training_scaler(self.market),
+                partition="validation",
+                initial_capital=10_000.0,
+                corporate_action_events=(weekend_event,),
+            )
+
+    def test_environment_ledger_processes_event_with_payment_after_partition_end(self):
+        event = self.make_distribution_event("late-payment", "2023-01-05", "2027-01-05")
+        env = self.service._build_env(
+            self.market,
+            fit_training_scaler(self.market),
+            partition="test",
+            initial_capital=10_000.0,
+            corporate_action_events=(event,),
+        )
+        env.reset(seed=42)
+        all_spy_action = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+
+        for _ in range(len(env.partition_dates) - 1):
+            _, _, terminated, _, info = env.step(all_spy_action)
+            if terminated:
+                break
+
+        self.assertGreater(event.payment_date, env.partition_dates[-1].date())
+        self.assertIn(event.event_id, info["dividend_receivables"])
+        self.assertGreater(info["dividend_receivables"][event.event_id], 0.0)
+        self.assertIn(event.event_id, env._ledger.applied_event_ids)
+
+    def test_empty_event_collection_is_forwarded_as_empty_and_preserves_no_event_behavior(
+        self,
+    ):
+        env = self.service._build_env(
+            self.market,
+            fit_training_scaler(self.market),
+            partition="test",
+            initial_capital=10_000.0,
+        )
+
+        self.assertEqual(env._events, ())
+        _, info = env.reset(seed=42)
+        self.assertFalse(info["corporate_actions_verified"])
+        self.assertEqual(info["dividend_receivables"], {})
 
 
 class HistoricalCorporateActionSourceTests(unittest.TestCase):
@@ -356,9 +511,10 @@ class HistoricalCorporateActionSourceTests(unittest.TestCase):
         ), patch(
             "src.backtest.historical_service.load_normalized_events"
         ) as load_events:
-            _, _, events = service._load_context()
+            _, _, events, source_metadata = service._load_context()
 
         self.assertEqual(events, ())
+        self.assertIsNone(source_metadata)
         load_events.assert_not_called()
 
     def test_configured_source_loads_events_with_manifest_bounds_and_full_calendar(
@@ -401,7 +557,7 @@ class HistoricalCorporateActionSourceTests(unittest.TestCase):
             "src.backtest.historical_service.load_normalized_events",
             wraps=load_normalized_events,
         ) as load_events:
-            _, _, events = service._load_context()
+            _, _, events, source_metadata = service._load_context()
 
         self.assertEqual(
             events,
@@ -425,6 +581,9 @@ class HistoricalCorporateActionSourceTests(unittest.TestCase):
                     distribution_per_share=0.7,
                 ),
             ),
+        )
+        self.assertEqual(
+            source_metadata["artifact_filename"], "verified_normalized_events.csv"
         )
         load_events.assert_called_once()
         loader_kwargs = load_events.call_args.kwargs
@@ -528,6 +687,216 @@ class HistoricalCorporateActionSourceTests(unittest.TestCase):
             CorporateActionSourceValidationError, "Byte-size mismatch"
         ):
             validate_issuer_verified_corporate_action_source(artifact)
+
+    def test_valid_source_metadata_matches_partition_events_and_health(self):
+        artifact = self.write_event_source(
+            [
+                (
+                    "SPY",
+                    "cash_dividend",
+                    "training-event",
+                    "USD",
+                    "2018-01-03",
+                    "2018-01-04",
+                    "2018-01-12",
+                    "",
+                    "0.5",
+                    "",
+                ),
+                (
+                    "SPY",
+                    "cash_dividend",
+                    "validation-event",
+                    "USD",
+                    "2022-01-03",
+                    "2022-01-04",
+                    "2022-01-12",
+                    "",
+                    "0.6",
+                    "",
+                ),
+                (
+                    "QQQ",
+                    "etf_distribution",
+                    "test-event",
+                    "USD",
+                    "2023-01-03",
+                    "2023-01-04",
+                    "2023-01-12",
+                    "",
+                    "0.7",
+                    "",
+                ),
+            ]
+        )
+        service = HistoricalBacktestService(
+            data_dir="unused-in-tests",
+            corporate_action_events_path=artifact,
+        )
+
+        with patch(
+            "src.backtest.historical_service.load_market_data",
+            return_value=self.market,
+        ):
+            result = service.run(
+                strategy_name="buy_and_hold",
+                partition="validation",
+                initial_capital=10_000.0,
+            )
+            health = service.health()
+
+        self.assertTrue(result["corporate_actions_verified"])
+        self.assertTrue(result["corporate_action_source_configured"])
+        self.assertTrue(result["corporate_action_source_validated"])
+        self.assertEqual(result["corporate_action_events_loaded"], 3)
+        self.assertEqual(result["corporate_action_events_for_partition"], 1)
+        self.assertEqual(
+            result["corporate_action_source"]["artifact_filename"],
+            "verified_normalized_events.csv",
+        )
+        self.assertIn(
+            "total-return accuracy are not guaranteed",
+            result["corporate_action_limitation"],
+        )
+        self.assertIn("incomplete for QQQ and IEF", " ".join(result["warnings"]))
+
+        self.assertTrue(health["available"])
+        self.assertTrue(health["corporate_actions_verified"])
+        self.assertTrue(health["corporate_action_source_configured"])
+        self.assertTrue(health["corporate_action_source_validated"])
+        self.assertTrue(health["corporate_action_events_load_succeeded"])
+        self.assertEqual(health["corporate_action_events_loaded"], 3)
+        self.assertEqual(
+            health["corporate_action_partition_event_counts"],
+            {"train": 1, "validation": 1, "test": 1},
+        )
+        self.assertEqual(
+            health["corporate_action_source"], result["corporate_action_source"]
+        )
+
+    def test_compare_preserves_source_metadata_and_counts_for_each_partition(self):
+        artifact = self.write_event_source(
+            [
+                (
+                    "SPY",
+                    "cash_dividend",
+                    "training-event",
+                    "USD",
+                    "2018-01-03",
+                    "2018-01-04",
+                    "2018-01-12",
+                    "",
+                    "0.5",
+                    "",
+                ),
+                (
+                    "SPY",
+                    "cash_dividend",
+                    "validation-event",
+                    "USD",
+                    "2022-01-03",
+                    "2022-01-04",
+                    "2022-01-12",
+                    "",
+                    "0.6",
+                    "",
+                ),
+                (
+                    "QQQ",
+                    "etf_distribution",
+                    "test-event",
+                    "USD",
+                    "2023-01-03",
+                    "2023-01-04",
+                    "2023-01-12",
+                    "",
+                    "0.7",
+                    "",
+                ),
+            ]
+        )
+        service = HistoricalBacktestService(
+            data_dir="unused-in-tests",
+            corporate_action_events_path=artifact,
+        )
+
+        with patch(
+            "src.backtest.historical_service.load_market_data",
+            return_value=self.market,
+        ):
+            for partition in ("train", "validation", "test"):
+                with self.subTest(partition=partition):
+                    comparison = service.compare(
+                        strategy_names=["equal_weight", "buy_and_hold"],
+                        partition=partition,
+                        initial_capital=10_000.0,
+                    )
+
+                    self.assertEqual(len(comparison["results"]), 2)
+                    for result in comparison["results"]:
+                        self.assertTrue(result["corporate_actions_verified"])
+                        self.assertTrue(result["corporate_action_source_configured"])
+                        self.assertTrue(result["corporate_action_source_validated"])
+                        self.assertEqual(result["corporate_action_events_loaded"], 3)
+                        self.assertEqual(
+                            result["corporate_action_events_for_partition"], 1
+                        )
+                        self.assertEqual(
+                            result["corporate_action_source"]["artifact_filename"],
+                            "verified_normalized_events.csv",
+                        )
+                    self.assertEqual(
+                        comparison["results"][0]["corporate_action_source"],
+                        comparison["results"][1]["corporate_action_source"],
+                    )
+
+    def test_health_reports_configured_but_invalid_source(self):
+        artifact = self.root / "not-the-verified-artifact.csv"
+        artifact.write_text("invalid", encoding="utf-8")
+        service = HistoricalBacktestService(
+            data_dir="unused-in-tests",
+            corporate_action_events_path=artifact,
+        )
+
+        health = service.health()
+
+        self.assertFalse(health["available"])
+        self.assertFalse(health["corporate_actions_verified"])
+        self.assertTrue(health["corporate_action_source_configured"])
+        self.assertFalse(health["corporate_action_source_validated"])
+        self.assertFalse(health["corporate_action_events_load_succeeded"])
+        self.assertIsNone(health["corporate_action_source"])
+        self.assertEqual(health["corporate_action_events_loaded"], 0)
+        self.assertIn(
+            "Expected the issuer workflow artifact",
+            health["dataset_validation"]["error"],
+        )
+
+    def test_health_reports_provenance_valid_but_event_load_failure(self):
+        artifact, manifest = self.write_source()
+        service = HistoricalBacktestService(
+            data_dir="unused-in-tests",
+            corporate_action_events_path=artifact,
+        )
+
+        with patch(
+            "src.backtest.historical_service.load_market_data",
+            return_value=self.market,
+        ), patch(
+            "src.backtest.historical_service.load_normalized_events",
+            side_effect=CorporateActionValidationError("invalid event rows"),
+        ):
+            health = service.health()
+
+        self.assertFalse(health["available"])
+        self.assertFalse(health["corporate_actions_verified"])
+        self.assertTrue(health["corporate_action_source_configured"])
+        self.assertTrue(health["corporate_action_source_validated"])
+        self.assertFalse(health["corporate_action_events_load_succeeded"])
+        self.assertEqual(
+            health["corporate_action_source"]["provider"], manifest["provider"]
+        )
+        self.assertEqual(health["corporate_action_events_loaded"], 0)
 
     def test_unsupported_provider_or_workbook_identity_is_rejected(self):
         for manifest_change, expected_error in (

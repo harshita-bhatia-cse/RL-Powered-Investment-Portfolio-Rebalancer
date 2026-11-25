@@ -19,12 +19,17 @@ from src.backtest.historical_strategies import (
     HistoricalStrategy,
     create_strategy,
 )
-from src.data.corporate_action_provider import load_normalized_events
+from src.data.corporate_action_provider import (
+    CorporateActionValidationError,
+    load_normalized_events,
+    validate_events,
+)
 from src.rl.environment.portfolio_env import (
     BENCHMARK_SYMBOL,
     PARTITION_BOUNDS,
     PortfolioTradingEnv,
     TrainOnlyFeatureScaler,
+    _normalize_market_data,
     fit_training_scaler,
     load_market_data,
 )
@@ -223,11 +228,15 @@ class HistoricalBacktestService:
         self._validate_capital(initial_capital)
         self._validate_partition(partition)
         strategy = self._make_strategy(strategy_name, parameters)
-        market_data, scaler, _ = self._load_context()
+        market_data, scaler, corporate_action_events, source_metadata = (
+            self._load_context()
+        )
         return self._run_with_context(
             strategy,
             market_data=market_data,
             scaler=scaler,
+            corporate_action_events=corporate_action_events,
+            corporate_action_source_metadata=source_metadata,
             partition=partition,
             initial_capital=initial_capital,
         )
@@ -259,12 +268,16 @@ class HistoricalBacktestService:
                 + ", ".join(sorted(unknown_parameter_names))
             )
 
-        market_data, scaler, _ = self._load_context()
+        market_data, scaler, corporate_action_events, source_metadata = (
+            self._load_context()
+        )
         results = [
             self._run_with_context(
                 strategy,
                 market_data=market_data,
                 scaler=scaler,
+                corporate_action_events=corporate_action_events,
+                corporate_action_source_metadata=source_metadata,
                 partition=partition,
                 initial_capital=initial_capital,
             )
@@ -278,12 +291,33 @@ class HistoricalBacktestService:
 
     def health(self) -> dict[str, Any]:
         """Validate all partition boundaries and finite environment observations."""
+        verified_source: tuple[Path, dict[str, Any]] | None = None
+        source_provenance: dict[str, Any] | None = None
+        events_load_succeeded = False
+        corporate_action_events: tuple[CorporateActionEvent, ...] = ()
+        partition_event_counts: dict[str, int] = {}
         try:
-            market_data, scaler, _ = self._load_context()
+            verified_source = self._validate_configured_corporate_action_source()
+            if verified_source is not None:
+                source_provenance = self._corporate_action_source_metadata(
+                    verified_source[1]
+                )
+            (
+                market_data,
+                scaler,
+                corporate_action_events,
+                source_metadata,
+            ) = self._load_context(verified_source=verified_source)
+            events_load_succeeded = source_metadata is not None
             partitions: dict[str, dict[str, Any]] = {}
             for name in PARTITION_BOUNDS:
-                env = self._build_env(
-                    market_data, scaler, partition=name, initial_capital=100_000.0
+                env, partition_events = self._build_env_with_events(
+                    market_data,
+                    scaler,
+                    partition=name,
+                    initial_capital=100_000.0,
+                    corporate_action_events=corporate_action_events,
+                    corporate_action_source_metadata=source_metadata,
                 )
                 observation, initial_info = env.reset(seed=42)
                 if not np.isfinite(observation).all():
@@ -298,43 +332,52 @@ class HistoricalBacktestService:
                     "scaler_fit_start": scaler.fitted_start,
                     "scaler_fit_end": scaler.fitted_end,
                 }
+                partition_event_counts[name] = len(partition_events)
             return {
                 "available": True,
                 "dataset_validation": {"valid": True, "partitions": partitions},
                 "supported_strategies": list(SUPPORTED_STRATEGIES),
-                "corporate_actions_verified": False,
-                "limitation": (
-                    "Historical corporate-action coverage is unverified; results "
-                    "are not guaranteed to be total-return accurate."
+                **self._corporate_action_health_metadata(
+                    source_configured=self.corporate_action_events_path is not None,
+                    source_provenance_validated=verified_source is not None,
+                    events_load_succeeded=events_load_succeeded,
+                    source_metadata=source_metadata,
+                    events_loaded=len(corporate_action_events),
+                    partition_event_counts=partition_event_counts,
                 ),
             }
-        except HistoricalDataUnavailableError as exc:
+        except (
+            CorporateActionSourceValidationError,
+            CorporateActionValidationError,
+            HistoricalDataUnavailableError,
+            OSError,
+        ) as exc:
             return {
                 "available": False,
                 "dataset_validation": {"valid": False, "error": str(exc)},
                 "supported_strategies": list(SUPPORTED_STRATEGIES),
-                "corporate_actions_verified": False,
-                "limitation": (
-                    "Historical corporate-action coverage is unverified; results "
-                    "are not guaranteed to be total-return accurate."
+                **self._corporate_action_health_metadata(
+                    source_configured=self.corporate_action_events_path is not None,
+                    source_provenance_validated=verified_source is not None,
+                    events_load_succeeded=events_load_succeeded,
+                    source_metadata=source_provenance,
+                    events_loaded=len(corporate_action_events),
+                    partition_event_counts=partition_event_counts,
                 ),
             }
 
     def _load_context(
         self,
+        *,
+        verified_source: tuple[Path, dict[str, Any]] | None = None,
     ) -> tuple[
         dict[str, pd.DataFrame],
         TrainOnlyFeatureScaler,
         tuple[CorporateActionEvent, ...],
+        dict[str, Any] | None,
     ]:
-        verified_source = None
-        if self.corporate_action_events_path is not None:
-            verified_source = (
-                self.corporate_action_events_path,
-                validate_issuer_verified_corporate_action_source(
-                    self.corporate_action_events_path
-                ),
-            )
+        if verified_source is None:
+            verified_source = self._validate_configured_corporate_action_source()
         try:
             market_data = load_market_data(self.data_dir)
             scaler = fit_training_scaler(market_data)
@@ -347,7 +390,69 @@ class HistoricalBacktestService:
             if verified_source is not None
             else ()
         )
-        return market_data, scaler, corporate_action_events
+        source_metadata = (
+            self._corporate_action_source_metadata(verified_source[1])
+            if verified_source is not None
+            else None
+        )
+        return market_data, scaler, corporate_action_events, source_metadata
+
+    def _validate_configured_corporate_action_source(
+        self,
+    ) -> tuple[Path, dict[str, Any]] | None:
+        if self.corporate_action_events_path is None:
+            return None
+        manifest = validate_issuer_verified_corporate_action_source(
+            self.corporate_action_events_path
+        )
+        return self.corporate_action_events_path, manifest
+
+    @staticmethod
+    def _corporate_action_source_metadata(manifest: dict[str, Any]) -> dict[str, Any]:
+        artifact = manifest["artifacts"][ISSUER_VERIFIED_EVENTS_FILENAME]
+        return {
+            "provider": manifest["provider"],
+            "source_workbook_url": manifest["source_workbook_url"],
+            "artifact_filename": ISSUER_VERIFIED_EVENTS_FILENAME,
+            "sha256": artifact["sha256"],
+            "bytes": artifact["bytes"],
+            "date_range": dict(manifest["date_range"]),
+            "limitations": list(manifest.get("limitations", [])),
+        }
+
+    @staticmethod
+    def _corporate_action_health_metadata(
+        *,
+        source_configured: bool,
+        source_provenance_validated: bool,
+        events_load_succeeded: bool,
+        source_metadata: dict[str, Any] | None,
+        events_loaded: int,
+        partition_event_counts: dict[str, int],
+    ) -> dict[str, Any]:
+        actions_verified = source_configured and events_load_succeeded
+        if actions_verified:
+            limitation = (
+                "The configured source and normalized events were validated, but "
+                "event coverage is limited to the supplied records; completeness "
+                "and total-return accuracy are not guaranteed. Manifest checksums "
+                "are provenance evidence, not digital signatures."
+            )
+        else:
+            limitation = (
+                "Historical corporate-action coverage is unverified; results "
+                "are not guaranteed to be total-return accurate."
+            )
+        return {
+            "corporate_actions_verified": actions_verified,
+            "corporate_action_source_configured": source_configured,
+            "corporate_action_source_validated": source_provenance_validated,
+            "corporate_action_events_load_succeeded": events_load_succeeded,
+            "corporate_action_source": source_metadata,
+            "corporate_action_events_loaded": events_loaded,
+            "corporate_action_partition_event_counts": partition_event_counts,
+            "limitation": limitation,
+        }
 
     def _load_corporate_action_events(
         self,
@@ -377,14 +482,46 @@ class HistoricalBacktestService:
         *,
         partition: str,
         initial_capital: float,
+        corporate_action_events: tuple[CorporateActionEvent, ...] = (),
+        corporate_action_source_metadata: dict[str, Any] | None = None,
     ) -> PortfolioTradingEnv:
+        env, _ = self._build_env_with_events(
+            market_data,
+            scaler,
+            partition=partition,
+            initial_capital=initial_capital,
+            corporate_action_events=corporate_action_events,
+            corporate_action_source_metadata=corporate_action_source_metadata,
+        )
+        return env
+
+    def _build_env_with_events(
+        self,
+        market_data: dict[str, pd.DataFrame],
+        scaler: TrainOnlyFeatureScaler,
+        *,
+        partition: str,
+        initial_capital: float,
+        corporate_action_events: tuple[CorporateActionEvent, ...] = (),
+        corporate_action_source_metadata: dict[str, Any] | None = None,
+    ) -> tuple[PortfolioTradingEnv, tuple[CorporateActionEvent, ...]]:
         if partition not in PARTITION_BOUNDS:
             raise ValueError(f"partition must be one of {tuple(PARTITION_BOUNDS)}")
+        partition_events = self._partition_corporate_action_events(
+            market_data, partition, corporate_action_events
+        )
         try:
             env = PortfolioTradingEnv(
                 market_data,
                 partition=partition,
                 initial_cash=initial_capital,
+                corporate_action_events=partition_events,
+                corporate_actions_verified=corporate_action_source_metadata is not None,
+                corporate_action_source=(
+                    corporate_action_source_metadata["provider"]
+                    if corporate_action_source_metadata is not None
+                    else None
+                ),
                 scaler=scaler,
                 random_start=False,
             )
@@ -402,7 +539,41 @@ class HistoricalBacktestService:
                 f"Historical data does not cover the full {partition} interval "
                 f"({expected_start.date()} through {expected_end.date()})"
             )
-        return env
+        return env, partition_events
+
+    @staticmethod
+    def _partition_corporate_action_events(
+        market_data: dict[str, pd.DataFrame],
+        partition: str,
+        corporate_action_events: tuple[CorporateActionEvent, ...],
+    ) -> tuple[CorporateActionEvent, ...]:
+        """Select and revalidate only actions occurring in a partition."""
+        if not corporate_action_events:
+            return ()
+
+        _, all_sessions = _normalize_market_data(market_data)
+        start, end = PARTITION_BOUNDS[partition]
+        partition_sessions = all_sessions[
+            (all_sessions >= start) & (all_sessions <= end)
+        ]
+        if partition_sessions.empty:
+            raise HistoricalDataUnavailableError(
+                f"Historical data has no sessions in the {partition} partition"
+            )
+
+        partition_start = partition_sessions[0].date()
+        partition_end = partition_sessions[-1].date()
+        selected_events = tuple(
+            event
+            for event in corporate_action_events
+            if partition_start <= event.action_date <= partition_end
+        )
+        return validate_events(
+            selected_events,
+            start_date=partition_start,
+            end_date=partition_end,
+            market_sessions=partition_sessions,
+        )
 
     def _run_with_context(
         self,
@@ -410,14 +581,18 @@ class HistoricalBacktestService:
         *,
         market_data: dict[str, pd.DataFrame],
         scaler: TrainOnlyFeatureScaler,
+        corporate_action_events: tuple[CorporateActionEvent, ...],
+        corporate_action_source_metadata: dict[str, Any] | None,
         partition: str,
         initial_capital: float,
     ) -> dict[str, Any]:
-        env = self._build_env(
+        env, partition_events = self._build_env_with_events(
             market_data,
             scaler,
             partition=partition,
             initial_capital=initial_capital,
+            corporate_action_events=corporate_action_events,
+            corporate_action_source_metadata=corporate_action_source_metadata,
         )
         observation, initial_info = env.reset(seed=42)
         dates = [pd.Timestamp(initial_info["date"])]
@@ -427,8 +602,21 @@ class HistoricalBacktestService:
         slippage_cost = 0.0
         warnings: list[str] = []
         corporate_action_limitation = initial_info.get("corporate_action_limitation")
+        if corporate_action_source_metadata is not None:
+            corporate_action_limitation = (
+                "The configured issuer-workflow source and normalized events were "
+                "validated, but event coverage is limited to supplied records; "
+                "completeness and total-return accuracy are not guaranteed. "
+                "Manifest checksums are provenance evidence, not digital signatures."
+            )
+            warnings.append(corporate_action_limitation)
+            warnings.extend(
+                f"Source limitation: {limitation}"
+                for limitation in corporate_action_source_metadata["limitations"]
+            )
         if corporate_action_limitation:
-            warnings.append(str(corporate_action_limitation))
+            if corporate_action_source_metadata is None:
+                warnings.append(str(corporate_action_limitation))
         if not initial_info["corporate_actions_verified"]:
             warnings.append(
                 "NAV is not verified as corporate-action-complete or total-return accurate."
@@ -507,10 +695,19 @@ class HistoricalBacktestService:
                 "total_transaction_cost": transaction_fees + slippage_cost,
             },
             "corporate_actions_verified": bool(
-                initial_info["corporate_actions_verified"]
+                corporate_action_source_metadata is not None
             ),
             "corporate_action_limitation": corporate_action_limitation,
             "return_accuracy": initial_info["return_accuracy"],
+            "corporate_action_source_configured": (
+                self.corporate_action_events_path is not None
+            ),
+            "corporate_action_source_validated": (
+                corporate_action_source_metadata is not None
+            ),
+            "corporate_action_source": corporate_action_source_metadata,
+            "corporate_action_events_loaded": len(corporate_action_events),
+            "corporate_action_events_for_partition": len(partition_events),
             "warnings": warnings,
         }
 
