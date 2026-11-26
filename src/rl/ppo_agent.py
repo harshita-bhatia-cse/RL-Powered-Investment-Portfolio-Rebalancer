@@ -407,7 +407,11 @@ def load_ppo_model(
     env: gym.Env | None = None,
     expected_config: PPOConfig | None = None,
 ) -> Any:
-    """Validate sidecar/checksum and load a compatible synthetic PPO artifact."""
+    """Validate sidecar/checksum and load a compatible synthetic PPO artifact.
+
+    The training seed remains manifest provenance; it does not affect inference
+    compatibility. Every other PPO configuration field is still checked.
+    """
     model_path, manifest_path = _model_paths(path)
     if not model_path.is_file():
         raise FileNotFoundError(f"PPO model artifact not found: {model_path}")
@@ -544,7 +548,11 @@ def _validate_manifest(
         raise ValueError("PPO model manifest has no valid configuration")
     if expected_config is not None:
         expected_config.validate()
-        if stored_config != _json_compatible(asdict(expected_config)):
+        stored_compatible_config = dict(stored_config)
+        expected_compatible_config = _json_compatible(asdict(expected_config))
+        stored_compatible_config.pop("seed", None)
+        expected_compatible_config.pop("seed", None)
+        if stored_compatible_config != expected_compatible_config:
             raise ValueError("PPO model configuration does not match expected_config")
     experiment_metadata = manifest.get("experiment_metadata")
     if experiment_metadata is not None:
