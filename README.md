@@ -146,6 +146,18 @@ Ensemble of Rolling Selection + Adaptive Rotation deployed on Alpaca paper tradi
 
 The Adaptive Rotation strategy dynamically shifts capital across three asset groups — **Growth Tech**, **Real Assets**, and **Defensive** — based on market regime signals. During risk-on regimes, the portfolio tilts toward high-momentum growth and commodity plays; when regime detection flags risk-off or fast risk-off conditions, capital rotates into bonds and utilities with an automatic cash buffer. Weekly rebalancing is complemented by daily stop-loss and fast risk-off monitoring, enabling rapid de-risking without waiting for the next scheduled rebalance.
 
+### Experimental Results and Conclusion
+
+A Proximal Policy Optimization (PPO) agent was developed and evaluated in a synthetic portfolio environment containing six ETFs and a cash allocation. Training variability was examined using five PPO training seeds: 42, 7, 21, 123, and 2026. Each model was evaluated on the same fixed synthetic validation scenario.
+
+Among the five runs, seed 2026 achieved the highest validation cumulative return, **1.19%**, and the highest validation Sharpe ratio, **0.1073**. It was selected for a separate held-out synthetic test evaluation on an unseen test scenario. This selection was based on validation return and Sharpe ratio; seed 2026 was not the best on every validation metric.
+
+On the held-out synthetic test scenario, the selected PPO model achieved a cumulative return of **-28.46%**, a Sharpe ratio of **-0.7260**, a maximum drawdown of **-50.16%**, and a final portfolio value of **$71,536.81**. It underperformed the equal-weight, monthly rebalancing, and threshold rebalancing strategies on final portfolio value. Its final portfolio value was higher than that of the SPY buy-and-hold benchmark; this comparison applies to final portfolio value only.
+
+The validation results varied across training seeds. On the evaluated held-out synthetic scenario, seed 2026’s performance was substantially weaker than its validation performance. These results illustrate the observed difference between this validation scenario and this test scenario; they do not establish how the agent would perform on other scenarios. The evaluation included transaction-cost assumptions, but this experiment does not isolate their effect on performance.
+
+Overall, the project demonstrates an implementation of a reinforcement-learning-based portfolio allocation and rebalancing pipeline. The evaluation used synthetic data only: it does not demonstrate real-market profitability and should not be interpreted as historical-market validation. Further evaluation would be needed before drawing conclusions about performance beyond the scenarios tested.
+
 ---
 
 ## Quick Start
@@ -219,6 +231,29 @@ shows an empty state or an error message instead of displaying invented values.
 Use the **Data** section to inspect local storage and the **Portfolio** section
 to select assets, weights, dates, and initial capital before requesting
 historical analytics.
+
+#### Reproducible Synthetic PPO Multi-Seed Runs
+
+The training seed controls PPO randomness; the scenario seed fixes the
+generated train, validation, and test splits. Each run must use a separate,
+empty output directory. The script refuses to overwrite existing run artifacts.
+From Windows CMD, run the five training seeds with the same scenario seed:
+
+```cmd
+python -m scripts.train_synthetic_ppo_dashboard --training-seed 42 --scenario-seed 42 --output-dir .artifacts\multi_seed\seed_42
+python -m scripts.train_synthetic_ppo_dashboard --training-seed 7 --scenario-seed 42 --output-dir .artifacts\multi_seed\seed_7
+python -m scripts.train_synthetic_ppo_dashboard --training-seed 21 --scenario-seed 42 --output-dir .artifacts\multi_seed\seed_21
+python -m scripts.train_synthetic_ppo_dashboard --training-seed 123 --scenario-seed 42 --output-dir .artifacts\multi_seed\seed_123
+python -m scripts.train_synthetic_ppo_dashboard --training-seed 2026 --scenario-seed 42 --output-dir .artifacts\multi_seed\seed_2026
+```
+
+These runs evaluate only on the shared validation split. Select a model using
+validation results before running the separate held-out test evaluator once for
+final reporting:
+
+```cmd
+python -m scripts.evaluate_synthetic_ppo_test --model-path .artifacts\multi_seed\seed_2026\model.zip --scenario-seed 42
+```
 
 #### Running Strategies via Python
 
