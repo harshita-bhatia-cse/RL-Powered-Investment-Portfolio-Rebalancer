@@ -58,7 +58,6 @@ finrl-trading/
 │   │   └── performance_analyzer.py #     Real-time P&L tracking
 │   └── main.py                     # 🚀  CLI entry point
 ├── examples/
-│   ├── FinRL_Full_Workflow.ipynb   # 📓  Complete workflow tutorial (start here!)
 │   └── README.md
 ├── data/                           # Runtime data storage (gitignored)
 ├── logs/                           # Application logs (gitignored)
@@ -114,6 +113,13 @@ A research-grade, walk-forward-safe rotation strategy with daily risk monitoring
 ---
 
 ## Results
+
+> **Legacy, unverified results — not validated performance.** The historical
+> backtest and paper-trading figures below are retained from prior
+> documentation, but supporting run artifacts and established data provenance
+> are not available in this repository. They have not been independently
+> reproduced and must not be interpreted as validated performance, evidence of
+> profitability, or real-world effectiveness.
 
 ### Historical Backtest (Jan 2018 – Oct 2025)
 
@@ -267,13 +273,15 @@ python src/strategies/run_adaptive_rotation_strategy.py \
 python src/strategies/run_adaptive_rotation_strategy.py \
     --config src/strategies/AdaptiveRotationConf_v1.2.1.yaml \
     --date 2024-12-31
-
-# Full workflow tutorial (Jupyter)
-jupyter notebook examples/FinRL_Full_Workflow.ipynb
 ```
 
-> **Note:** Data files (`{SYMBOL}_daily.csv`) must exist under `data/fmp_daily/` before running.
-> `deploy.sh` downloads them automatically; for manual setup, either run `deploy.sh --strategy adaptive_rotation --mode backtest` once, or prepare CSV files with columns `date,open,high,low,close,volume`.
+> **Data paths are separate:** The adaptive-rotation strategy configuration
+> uses `./data/fmp_daily`, which is not present in this checkout. The historical
+> backtesting API instead reads the local dataset under
+> `data/historical_market_csv/`; it is not a substitute for the strategy's
+> configured input. Do not infer the historical dataset's provider,
+> redistribution permissions, or corporate-action completeness from its
+> location or file format.
 
 ### Configuration
 
@@ -344,6 +352,10 @@ coverage is unverified by default, so results must not be described as
 corporate-action-complete or total-return accurate. The existing allocation
 configuration defaults transaction fees and slippage to zero; response totals
 reflect those settings rather than estimated costs.
+
+**Historical-data status: NO-GO for PPO training or validated performance
+claims.** Provider provenance and redistribution permissions have not been
+established, and corporate-action coverage remains unverified.
 
 ---
 

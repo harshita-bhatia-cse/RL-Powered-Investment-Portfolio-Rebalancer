@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -183,6 +184,50 @@ class MultiSeedSyntheticPPOTests(unittest.TestCase):
                     model_path,
                     env=bundle.validation_env,
                     expected_config=incompatible_config,
+                )
+
+    def test_model_load_rejects_inconsistent_manifest_and_config_seeds(self):
+        train_config = PPOConfig(
+            n_steps=8,
+            batch_size=4,
+            net_arch=(16, 16),
+            seed=7,
+            device="cpu",
+        )
+        bundle = build_ppo_environments(
+            SyntheticMarketConfig(sessions=130),
+            seed=42,
+        )
+        model = create_ppo_agent(bundle.train_env, train_config)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            model_path, manifest_path = save_ppo_model(
+                model,
+                Path(temporary_directory) / "model",
+                config=train_config,
+                seed=7,
+                provenance=bundle.pipeline.datasets.train.metadata,
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["ppo_config"]["seed"] = 8
+            manifest_path.write_text(
+                json.dumps(manifest),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "saved configuration seed does not match manifest seed",
+            ):
+                load_ppo_model(
+                    model_path,
+                    env=bundle.validation_env,
+                    expected_config=PPOConfig(
+                        n_steps=8,
+                        batch_size=4,
+                        net_arch=(16, 16),
+                        seed=42,
+                        device="cpu",
+                    ),
                 )
 
     def test_output_guard_preserves_existing_baseline_artifacts(self):

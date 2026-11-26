@@ -537,15 +537,19 @@ def _validate_manifest(
     provenance = manifest.get("provenance")
     if not isinstance(provenance, dict) or provenance.get("synthetic") not in (None, True):
         raise ValueError("model provenance metadata must remain synthetic")
-    _validate_seed(manifest.get("seed"))
+    manifest_seed = _validate_seed(manifest.get("seed"))
     if provenance.get("seed") is not None:
         _validate_seed(provenance.get("seed"))
-    expected_checksum = manifest.get("model_sha256")
-    if not isinstance(expected_checksum, str) or expected_checksum != _sha256_file(model_path):
-        raise ValueError("PPO model checksum does not match its manifest")
     stored_config = manifest.get("ppo_config")
     if not isinstance(stored_config, dict):
         raise ValueError("PPO model manifest has no valid configuration")
+    if _validate_seed(stored_config.get("seed")) != manifest_seed:
+        raise ValueError(
+            "saved configuration seed does not match manifest seed"
+        )
+    expected_checksum = manifest.get("model_sha256")
+    if not isinstance(expected_checksum, str) or expected_checksum != _sha256_file(model_path):
+        raise ValueError("PPO model checksum does not match its manifest")
     if expected_config is not None:
         expected_config.validate()
         stored_compatible_config = dict(stored_config)
