@@ -12,8 +12,9 @@ from typing import Dict, List
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query, status as http_status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import OperationalError
 from pydantic import BaseModel, Field, model_validator
 
 from src.analytics import (
@@ -32,14 +33,58 @@ from src.api.backtest_schemas import (
     HistoricalComparisonRequest,
     HistoricalComparisonResponse,
 )
+from src.api.account_api import router as account_router
+from src.api.phase8_research_api import router as phase8_research_router
 from src.backtest.historical_service import (
     HistoricalBacktestService,
     HistoricalDataUnavailableError,
     UnsupportedStrategyError,
 )
 from src.data.data_store import get_data_store
+from src.database.migrations import initialize_database
 
 app = FastAPI(title="Portfolio Analytics API", version="1.0.0")
+app.state.account_database_ready = False
+app.state.account_database_error = None
+app.include_router(account_router)
+app.include_router(phase8_research_router)
+
+
+def initialize_account_database() -> None:
+    """Initialize account storage without blocking the research application."""
+    try:
+        initialize_database()
+    except Exception as error:
+        app.state.account_database_ready = False
+        app.state.account_database_error = type(error).__name__
+        logging.getLogger(__name__).exception(
+            "Account database initialization failed; account routes are unavailable"
+        )
+        return
+    app.state.account_database_ready = True
+    app.state.account_database_error = None
+
+
+app.router.add_event_handler("startup", initialize_account_database)
+
+
+@app.middleware("http")
+async def account_database_unavailable_response(request, call_next):
+    account_path = request.url.path.startswith(
+        ("/api/auth/", "/api/portfolios", "/api/research/phase7-2")
+    )
+    try:
+        return await call_next(request)
+    except OperationalError:
+        if not account_path:
+            raise
+        logging.getLogger(__name__).exception(
+            "Account database request failed; returning service unavailable"
+        )
+        return JSONResponse(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": "Account persistence is unavailable"},
+        )
 
 _STATIC_DIR = Path(__file__).resolve().parents[1] / "web" / "static"
 

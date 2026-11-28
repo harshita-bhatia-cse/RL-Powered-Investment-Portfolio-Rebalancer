@@ -3,11 +3,11 @@
 
 # Investment Portfolio Rebalancer
 
-### A research platform for reinforcement-learning portfolio allocation and rebalancing
+### An engineering project for portfolio research and paper simulation
 
-*Built on FinRL-X: a deployment-consistent research system for data processing, portfolio construction, backtesting, and safeguarded paper-trading integrations.*
+*A final-year project with separate India-focused portfolio APIs, historical CSV research, and synthetic-only PPO experiments.*
 
-[Quick Start](#quick-start) | [Dashboard](#investment-portfolio-rebalancer-dashboard) | [Strategies](#strategies) | [Results](#results)
+[Quick Start](#quick-start) | [Dashboard](#investment-portfolio-rebalancer-dashboard) | [Implemented Research and Portfolio Functions](#implemented-research-and-portfolio-functions) | [Results](#results)
 
 </div>
 
@@ -15,28 +15,41 @@
 
 ## About
 
-**Investment Portfolio Rebalancer** is an academic and research-oriented application built on the FinRL-X infrastructure. It focuses on portfolio-level allocation decisions: how capital is distributed across assets, when to rebalance, and how transaction costs and risk constraints affect results.
+**Investment Portfolio Rebalancer** is an academic engineering project. Its implemented components include an India-focused account and portfolio API, stored end-of-day price valuation, portfolio monitoring and rebalance previews, a historical CSV backtest API, and a separate synthetic PPO research experiment.
 
-The application uses reproducible synthetic scenarios, historical analytics, and PPO-based reinforcement-learning experiments. It does not assume that RL is superior to conventional strategies; the question is evaluated through controlled comparisons and risk-adjusted metrics.
+These components are separate: the historical backtest reads its configured CSV dataset; account valuation and previews use stored India EOD prices; and Phase 7.2 PPO experiments use synthetic data only. Synthetic experiment metrics are not NSE/BSE or real-market investment performance.
 
 > This project is for education and research. It is not financial advice, does not guarantee returns, and does not execute real-money trades from the dashboard.
 
-At its core is a **weight-centric architecture** — the target portfolio weight vector is the sole interface contract between strategy logic and downstream execution:
+> **Scope:** account records are limited to exchange-qualified NSE/BSE
+> listings. Valuation uses already-stored EOD prices. Monitoring reports and
+> rebalance previews are simulations; they do not execute or automate trades
+> and are not investment recommendations. The India-focused portfolio API
+> and teammate-owned dashboard do not connect to a brokerage; the dashboard is
+> not connected to the account API. Separately, the repository retains a
+> legacy Alpaca CLI trading path that can submit broker orders when configured.
+> That path is not part of the India-focused first-version portfolio workflow.
+
+The historical research code includes a weight-based allocation interface:
 
 $$w_t = \mathcal{R}_t\bigl(\mathcal{T}_t\bigl(\mathcal{A}_t\bigl(\mathcal{S}_t(\mathcal{X}_{\le t})\bigr)\bigr)\bigr)$$
 
-where $\mathcal{S}$ denotes stock selection, $\mathcal{A}$ portfolio allocation, $\mathcal{T}$ timing adjustment, and $\mathcal{R}$ portfolio-level risk overlay. Each transformation is contract-preserving — you can swap any module (e.g. equal-weight $\to$ DRL allocator) without touching the rest of the pipeline, and the same weights flow identically through backtesting and live execution.
+where $\mathcal{S}$ denotes stock selection, $\mathcal{A}$ portfolio allocation, $\mathcal{T}$ timing adjustment, and $\mathcal{R}$ portfolio-level risk overlay. This describes retained research code, not a live execution or brokerage interface.
 
 ---
 
-## Architecture
+## Legacy Research Architecture
 
-| Layer | Role | Components |
+The repository retains older research modules and examples. They are not
+claims that the current application provides every listed data source,
+strategy, or execution capability.
+
+| Layer | Legacy role | Components |
 |:------|:-----|:-----------|
 | **Data** | Unified market data pipeline | FMP, Yahoo Finance, WRDS; LLM sentiment preprocessing; SQLite cache |
 | **Strategy** | Weight-centric signal generation | Stock selection, portfolio allocation, timing adjustment, risk overlay |
 | **Backtest** | Offline evaluation | `bt`-powered engine with multi-benchmark comparison and transaction costs |
-| **Execution** | Live/paper trading | Alpaca multi-account integration with pre-trade risk checks |
+| **Execution** | Legacy CLI integration, separate from the India-focused portfolio API | Alpaca order submission when configured; not used by the account API or dashboard |
 
 ```
 finrl-trading/
@@ -52,10 +65,9 @@ finrl-trading/
 │   ├── strategies/                 # 🤖  Trading strategies
 │   │   ├── base_strategy.py        #     Abstract strategy framework
 │   │   └── ml_strategy.py          #     Random Forest stock selection
-│   ├── trading/                    # 💰  Live trading execution
-│   │   ├── alpaca_manager.py       #     Alpaca API integration (multi-account)
-│   │   ├── trade_executor.py       #     Order management & risk controls
-│   │   └── performance_analyzer.py #     Real-time P&L tracking
+│   ├── trading/                    # Legacy repository code; not part of this API
+│   │   ├── alpaca_manager.py       # Historical source retained in repository
+│   │   └── trade_executor.py       # Not used by account or research APIs
 │   └── main.py                     # 🚀  CLI entry point
 ├── examples/
 │   └── README.md
@@ -67,265 +79,465 @@ finrl-trading/
 
 ---
 
-## Strategies
+## Implemented Research and Portfolio Functions
 
-FinRL-X implements three use cases from the paper, each demonstrating different compositions of the weight-centric pipeline.
+The current implementation has distinct workflows:
 
-### Use Case 1 — Portfolio Allocation Paradigms
-
-Compares heterogeneous allocation methods under a unified interface:
-
-| Method | Type | Description |
-|:-------|:-----|:------------|
-| Equal Weight | Classical | Uniform 1/N allocation |
-| Mean-Variance | Classical | Markowitz optimization |
-| Minimum Variance | Classical | Minimize portfolio volatility |
-| DRL Allocator | Learning | PPO/SAC continuous weight generation |
-| KAMA Timing | Signal | Kaufman adaptive trend overlay |
-
-All methods output the same weight vector, making them directly composable with timing and risk overlays.
-
-### Use Case 2 — Rolling Stock Selection + DRL
-
-Quarterly selection of top-25% NASDAQ-100 stocks via ML fundamental scoring, combined with DRL-based portfolio allocation. Strict no-lookahead semantics prevent data leakage.
-
-### Use Case 3 — Adaptive Multi-Asset Rotation
-
-A research-grade, walk-forward-safe rotation strategy with daily risk monitoring:
-
-| Component | Detail |
-|:----------|:-------|
-| **Asset Groups** | Growth Tech, Real Assets, Defensive — max 2 active per week |
-| **Group Selection** | Information Ratio relative to QQQ benchmark |
-| **Intra-Group Ranking** | Residual momentum with robust Z-score exception handling |
-| **Market Regime** | Slow regime (26-week trend + VIX) + Fast Risk-Off (3-day shock) |
-| **Risk Controls** | Trailing stop-loss, absolute stop-loss, cooldown periods |
-| **Rebalance** | Weekly (full) + daily monitoring (fast risk-off, stop-loss adjustments) |
-
-```bash
-# Run the adaptive rotation backtest
-./deploy.sh --strategy adaptive_rotation --mode backtest --start 2023-01-01 --end 2024-12-31
-
-# Paper trade with Alpaca
-./deploy.sh --strategy adaptive_rotation --mode paper --dry-run
-```
-
----
+- **India-focused account API:** stores owner-scoped account, portfolio,
+  holding, and transaction records. See the account sections below.
+- **Historical CSV backtesting:** runs the supported deterministic strategies
+  on the configured CSV dataset and fixed train, validation, or test
+  partition. It does not connect to account portfolios or brokers.
+- **Synthetic PPO research:** Phase 7.2 is the only implemented Phase 7
+  sub-phase. It evaluates PPO using synthetic data only; it does not evaluate
+  NSE/BSE market performance.
+- **Phase 8A research API:** exposes authenticated, read-only views of the
+  frozen Phase 7.2 results. It does not run an experiment or load a model.
 
 ## Results
 
-> **Legacy, unverified results — not validated performance.** The historical
-> backtest and paper-trading figures below are retained from prior
-> documentation, but supporting run artifacts and established data provenance
-> are not available in this repository. They have not been independently
-> reproduced and must not be interpreted as validated performance, evidence of
-> profitability, or real-world effectiveness.
-
-### Historical Backtest (Jan 2018 – Oct 2025)
-
-| Metric | Rolling Strategy | Adaptive Rotation | QQQ | SPY |
-|:-------|:---:|:---:|:---:|:---:|
-| Cumulative Return | 5.98x | 4.80x | 4.02x | 2.80x |
-| Annualized Return | 25.85% | 22.32% | 19.56% | 14.14% |
-| Annualized Volatility | 27.85% | 20.30% | 24.20% | 19.61% |
-| **Sharpe Ratio** | 0.93 | **1.10** | 0.81 | 0.72 |
-| Max Drawdown | -38.95% | **-21.46%** | -35.12% | -33.72% |
-| **Calmar Ratio** | 0.66 | **1.04** | 0.56 | 0.42 |
-| Win Rate | 54.36% | 54.77% | 56.25% | 55.28% |
-
-### Paper Trading (Oct 2025 – Mar 2026)
-
-Ensemble of Rolling Selection + Adaptive Rotation deployed on Alpaca paper trading:
-
-| Metric | Strategy | SPY | QQQ |
-|:-------|:---:|:---:|:---:|
-| Cumulative Return | **1.20x** | 0.97x | 0.95x |
-| Total Return | **+19.76%** | -2.51% | -4.79% |
-| Annualized Return | **62.16%** | -6.60% | -12.32% |
-| Annualized Volatility | 31.75% | 11.96% | 16.79% |
-| **Sharpe Ratio** | **1.96** | -0.55 | -0.73 |
-| Max Drawdown | -12.22% | -5.35% | -7.88% |
-| **Calmar Ratio** | **5.09** | -1.23 | -1.56 |
-| Win Rate | **64.89%** | 52.13% | 54.02% |
-
-### Dynamic Sector Rotation
-
-The Adaptive Rotation strategy dynamically shifts capital across three asset groups — **Growth Tech**, **Real Assets**, and **Defensive** — based on market regime signals. During risk-on regimes, the portfolio tilts toward high-momentum growth and commodity plays; when regime detection flags risk-off or fast risk-off conditions, capital rotates into bonds and utilities with an automatic cash buffer. Weekly rebalancing is complemented by daily stop-loss and fast risk-off monitoring, enabling rapid de-risking without waiting for the next scheduled rebalance.
-
-### Experimental Results and Conclusion
-
-A Proximal Policy Optimization (PPO) agent was developed and evaluated in a synthetic portfolio environment containing six ETFs and a cash allocation. Training variability was examined using five PPO training seeds: 42, 7, 21, 123, and 2026. Each model was evaluated on the same fixed synthetic validation scenario.
-
-Among the five runs, seed 2026 achieved the highest validation cumulative return, **1.19%**, and the highest validation Sharpe ratio, **0.1073**. It was selected for a separate held-out synthetic test evaluation on an unseen test scenario. This selection was based on validation return and Sharpe ratio; seed 2026 was not the best on every validation metric.
-
-On the held-out synthetic test scenario, the selected PPO model achieved a cumulative return of **-28.46%**, a Sharpe ratio of **-0.7260**, a maximum drawdown of **-50.16%**, and a final portfolio value of **$71,536.81**. It underperformed the equal-weight, monthly rebalancing, and threshold rebalancing strategies on final portfolio value. Its final portfolio value was higher than that of the SPY buy-and-hold benchmark; this comparison applies to final portfolio value only.
-
-The validation results varied across training seeds. On the evaluated held-out synthetic scenario, seed 2026’s performance was substantially weaker than its validation performance. These results illustrate the observed difference between this validation scenario and this test scenario; they do not establish how the agent would perform on other scenarios. The evaluation included transaction-cost assumptions, but this experiment does not isolate their effect on performance.
-
-Overall, the project demonstrates an implementation of a reinforcement-learning-based portfolio allocation and rebalancing pipeline. The evaluation used synthetic data only: it does not demonstrate real-market profitability and should not be interpreted as historical-market validation. Further evaluation would be needed before drawing conclusions about performance beyond the scenarios tested.
+Phase 7.2 completed a synthetic PPO experiment with 15 trained runs, 300
+validation results, one frozen configuration selection, and 100 held-out
+synthetic test results. These are outputs of the specified synthetic
+environment only. They are not NSE/BSE or real-market performance, and they
+do not establish investment value, profitability, or future results. The
+results are available through the Phase 8A API when the required frozen
+artifacts are provisioned; numeric metrics are intentionally not reproduced
+here.
 
 ---
 
 ## Quick Start
 
-### Option A — One-Command Deploy
-
-`deploy.sh` handles everything automatically: dependency check, data download, and strategy execution.
+### Setup
 
 ```bash
-git clone https://github.com/AI4Finance-Foundation/FinRL-Trading.git
-cd FinRL-Trading
-
-# Backtest (downloads data + runs strategy)
-./deploy.sh --strategy adaptive_rotation --mode backtest
-
-# Custom date range
-./deploy.sh --strategy adaptive_rotation --mode backtest --start 2020-01-01 --end 2025-12-31
-
-# Single date signal
-./deploy.sh --strategy adaptive_rotation --mode single --date 2024-12-31
-
-# Paper trading (requires Alpaca credentials in .env)
-./deploy.sh --strategy adaptive_rotation --mode paper --dry-run   # preview
-./deploy.sh --strategy adaptive_rotation --mode paper              # execute
-
-# See all options
-./deploy.sh --help
-```
-
-### Option B — Manual Setup with venv
-
-```bash
-# 1. Clone
-git clone https://github.com/AI4Finance-Foundation/FinRL-Trading.git
-cd FinRL-Trading
-
-# 2. Create and activate virtual environment
+# From the repository root
 python3 -m venv venv
 source venv/bin/activate        # Linux / macOS
 # venv\Scripts\activate         # Windows
 
-# 3. Install dependencies
+# Install project dependencies
 pip install -r requirements.txt
-
-# 4. (Optional) Configure API keys for paper trading
-cp .env.example .env
-# Edit .env — set APCA_API_KEY, APCA_API_SECRET, etc.
 ```
 
 ### Investment Portfolio Rebalancer dashboard
 
-The dashboard is a responsive HTML, CSS, and JavaScript interface served by
-the existing FastAPI application. It does not expose credentials, execute
-real-money orders, or replace any backend research workflow.
+The existing dashboard is served by the FastAPI application. Its UI is
+teammate-owned, has not been changed for this work, and is not connected to the
+India-focused account API.
 
 ```powershell
 # Windows PowerShell
 python src/main.py dashboard
 ```
 
-Open [http://localhost:8501](http://localhost:8501). The dashboard provides:
+The dashboard remains a separate research UI; it is not the interface for
+account records, stored-price portfolio valuation, monitoring, or rebalance
+previews.
 
-- Portfolio allocation validation and historical analytics from locally stored price data
-- Interactive portfolio-value chart, allocation chart, risk metrics, and sortable asset table when historical data is available
-- Synthetic market preview using a seed and a selected number of sessions
-- Explicit synthetic PPO training, saved-model validation, and benchmark comparison
-- Storage statistics and API status from the existing FastAPI endpoints
+#### Authenticated portfolio API foundation
 
-If historical data or a saved PPO artifact is unavailable, the relevant panel
-shows an empty state or an error message instead of displaying invented values.
-Use the **Data** section to inspect local storage and the **Portfolio** section
-to select assets, weights, dates, and initial capital before requesting
-historical analytics.
+The account API stores users, India-listed portfolio snapshots, holdings, and
+transaction records in a separate SQLAlchemy database. The default local URL
+is `sqlite:///./data/portfolio_platform.db`; set `PORTFOLIO_DATABASE_URL` to a
+PostgreSQL SQLAlchemy URL for deployment. This database does not replace or
+migrate the SQLite research `DataStore`.
 
-#### Reproducible Synthetic PPO Multi-Seed Runs
+Set `AUTH_JWT_SECRET` to a unique random value of at least 32 bytes before
+using login-protected routes. Generate one locally with
+`python -c "import secrets; print(secrets.token_urlsafe(48))"` and store it in
+your private `.env` file; never commit the generated secret.
 
-The training seed controls PPO randomness; the scenario seed fixes the
-generated train, validation, and test splits. Each run must use a separate,
-empty output directory. The script refuses to overwrite existing run artifacts.
-From Windows CMD, run the five training seeds with the same scenario seed:
+The account schema is initialized at FastAPI startup. If account database
+initialization fails, the application can start, but account routes and the
+Phase 8A research routes that share account authentication return HTTP 503.
+The historical backtest routes are separate from that account database.
+Pending schema revisions can also be applied with
+`python -m src.database.migrations`. Existing databases at revision
+`0001_account_foundation` are checked for invalid transaction records before
+revision 0002 adds stricter enforcement; migration stops without changing
+those records if invalid rows are found.
+Revision 0003 adds the ledger opening-balance snapshot and a nullable posting
+marker. Pre-existing transaction rows remain historical and are not replayed.
+If legacy cash transactions contain non-zero fees, the migration stops and
+identifies the affected transaction IDs rather than rewriting them.
+Revision 0004 adds a nullable client idempotency key and enforces uniqueness
+per portfolio. Existing transaction records remain unchanged and keyless
+requests remain supported. Submit `idempotency_key` in the transaction JSON:
+an identical retry returns the original transaction with HTTP 200 without
+reposting balances; reusing the key with a different payload returns HTTP 409.
+Database uniqueness protects this behavior under concurrent requests.
 
-```cmd
-python -m scripts.train_synthetic_ppo_dashboard --training-seed 42 --scenario-seed 42 --output-dir .artifacts\multi_seed\seed_42
-python -m scripts.train_synthetic_ppo_dashboard --training-seed 7 --scenario-seed 42 --output-dir .artifacts\multi_seed\seed_7
-python -m scripts.train_synthetic_ppo_dashboard --training-seed 21 --scenario-seed 42 --output-dir .artifacts\multi_seed\seed_21
-python -m scripts.train_synthetic_ppo_dashboard --training-seed 123 --scenario-seed 42 --output-dir .artifacts\multi_seed\seed_123
-python -m scripts.train_synthetic_ppo_dashboard --training-seed 2026 --scenario-seed 42 --output-dir .artifacts\multi_seed\seed_2026
+The SQLite database is the zero-cost local-development option. For a
+PostgreSQL SQLAlchemy URL, install the optional driver extra with
+`pip install -e ".[database]"`, then set `PORTFOLIO_DATABASE_URL` in `.env`.
+
+Available routes include `POST /api/auth/register`, `POST /api/auth/login`,
+`GET /api/auth/me`, and authenticated `/api/portfolios` operations for
+portfolios, holdings, and transaction history. Portfolio resources are scoped
+to the authenticated owner. Holdings identify each listing by the required
+`exchange` (`NSE` or `BSE`) plus symbol; the application does not infer that
+two exchange listings represent the same issuer. Transactions are stored
+in an immutable ledger and the authenticated transaction POST endpoint applies
+BUY, SELL, cash deposit, and cash withdrawal entries to the portfolio. A BUY
+debits quantity multiplied by unit price plus fees and adds fees to weighted
+average cost; a SELL credits gross proceeds less fees and retains the remaining
+shares' average cost. Cash movements use `cash_amount` and do not accept fees.
+Amounts posted to cash are rounded to INR paise (two decimals, half-up), and
+share quantities and average cost are rounded to six decimal places (half-up).
+This is manual paper bookkeeping only; no order is submitted by the ledger.
+
+Before the first posted transaction, the service snapshots the portfolio's
+current cash and holdings once. Earlier transaction rows are historical and
+are excluded from ledger replay. `GET /api/portfolios/{portfolio_id}/reconciliation`
+compares that immutable snapshot plus subsequently posted transactions with
+current cash and holdings; manual edits remain allowed but appear as
+discrepancies. There is no automatic baseline reset or rebase operation.
+PostgreSQL posting locks the portfolio row. SQLite uses a conditional cash
+balance update to detect competing writes, but SQLite has no row-level locking
+and concurrent writers may receive a retryable conflict or database-busy
+error. This local account ledger is not a brokerage statement or tax ledger.
+
+To import holdings into an existing owned portfolio, use the authenticated
+`POST /api/portfolios/{portfolio_id}/holdings/import` endpoint with a
+multipart field named `file`. CSV files must be UTF-8, no larger than 1 MiB,
+and contain exactly these columns:
+
+```csv
+exchange,symbol,quantity,average_price
+NSE,RELIANCE,5,1250.50
+NSE,TCS,2,3400.00
+BSE,500325,3,1500.00
 ```
 
-These runs evaluate only on the shared validation split. Select a model using
-validation results before running the separate held-out test evaluator once for
-final reporting:
+Rows are validated before insertion. Duplicate listings, malformed values,
+and conflicts with existing holdings reject the entire upload; no holdings
+are overwritten. The endpoint reports invalid row numbers. The portfolio
+summary endpoint reports holdings count, exchange counts, cash balance, and
+quantity multiplied by average purchase price as invested amount. It does not
+estimate current market value or profit/loss. Install project requirements
+with `pip install -r requirements.txt` to include the free multipart parser.
 
-```cmd
-python -m scripts.evaluate_synthetic_ppo_test --model-path .artifacts\multi_seed\seed_2026\model.zip --scenario-seed 42
+#### Indian EOD market-data storage and valuation
+
+The repository already includes `YahooFinanceIndiaProvider` (through
+yfinance), an Alpha Vantage adapter, and an India daily-feed writer. Those
+legacy collection paths are separate from account valuation: the feed can
+write to the research `DataStore`, Yahoo/yfinance licensing and redistribution
+rights are not verified here, and Alpha Vantage availability/limits depend on
+its plan. The project does not scrape NSE/BSE. None of those providers is
+activated by the account valuation API.
+
+Phase 4 introduces a provider contract and dedicated `eod_prices` database,
+defaulting to `sqlite:///./data/market_data.db` and configurable with
+`MARKET_DATA_DATABASE_URL`. It is independent of both account persistence and
+the research DataStore. Its additive migration is `0001_eod_prices`; it creates
+the price table and migration ledger without changing existing databases.
+Validated price ingestion and historical retrieval are available through the
+`src.market_data.service` functions and an injected provider. No HTTP endpoint
+or background job fetches third-party prices. The included mock provider is
+for tests only.
+
+The EOD record stores exchange, symbol, market date, INR OHLC, optional volume,
+provider/source, fetch time, and an explicit valuation-permission flag.
+Adjusted close is intentionally not stored: no source-specific adjustment
+semantics have been verified for this account product. Ingestion rejects
+future dates, non-positive/non-finite prices, invalid OHLC relationships,
+invalid volume/currency, and duplicate listing dates.
+
+Authenticated `GET /api/portfolios/{portfolio_id}/valuation` reads stored
+prices only and is owner-scoped. It calculates invested cost basis separately
+from market value and unrealized profit/loss. A price can be used only when
+its stored source is explicitly marked permitted for valuation and its market
+date is within `MARKET_DATA_MAX_AGE_DAYS` (default 4 elapsed calendar days).
+This conservative elapsed-calendar threshold does not infer a trading session
+from weekends or holidays. Stale, missing, and non-permitted prices are
+reported separately. Market value and unrealized P/L are identified as
+partial when not all holdings can be priced; total portfolio value is `null`
+unless every holding has a sufficiently fresh permitted price. Cash and
+holdings are not modified by valuation.
+
+#### Read-only portfolio monitoring (Phase 6.1)
+
+Authenticated `POST /api/portfolios/{portfolio_id}/monitor` evaluates one
+explicit `session_date` (`YYYY-MM-DD`). The service reads the portfolio and
+holdings, reuses stored-price valuation and ledger reconciliation, and writes
+only a separate monitoring report. It does not ingest prices, create trades,
+or modify portfolio cash, holdings, or transactions. A price later than the
+requested session is rejected for that report to prevent look-ahead on
+historical reruns.
+
+Reports are stored in `portfolio_monitoring_reports` by additive account
+migration `0005_portfolio_monitoring_reports`. The portfolio/session-date key
+is unique: repeating a request returns the original persisted result rather
+than reevaluating or overwriting it. Owners can list reports with
+`GET /api/portfolios/{portfolio_id}/monitor/reports` and retrieve an owned
+report with `GET /api/portfolios/{portfolio_id}/monitor/reports/{report_id}`.
+The one-shot runner is:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.services.portfolio_monitor `
+  --portfolio-id <portfolio-id> --session-date YYYY-MM-DD
 ```
 
-#### Running Strategies via Python
+Statuses are:
 
-```bash
-# Backtest — Adaptive Rotation (2023-01-01 to 2024-12-31)
-python src/strategies/run_adaptive_rotation_strategy.py \
-    --config src/strategies/AdaptiveRotationConf_v1.2.1.yaml \
-    --backtest --start 2023-01-01 --end 2024-12-31
+| Status | Meaning |
+| --- | --- |
+| `NO_ACTION_REQUIRED` | The configured data-quality and ledger checks completed, valuation is complete, and reconciliation found no discrepancy. This is not an investment recommendation and does not mean the portfolio is optimal or that no trade could be appropriate. |
+| `ACTION_REQUIRED` | Evaluation completed, but ledger reconciliation is unavailable or found a discrepancy that needs data-integrity follow-up. |
+| `DATA_UNAVAILABLE` | At least one required holding lacks a fresh permitted price on or before the requested session. No complete NAV is reported. |
+| `EVALUATION_FAILED` | An unexpected evaluation error occurred; the report contains safe generic error details and diagnostic details are logged server-side. |
 
-# Single date signal
-python src/strategies/run_adaptive_rotation_strategy.py \
-    --config src/strategies/AdaptiveRotationConf_v1.2.1.yaml \
-    --date 2024-12-31
-```
+Phase 6.1 requires the caller to provide the session date; it adds no
+scheduler or automatic exchange-calendar logic. Only prices already present
+in the dedicated market-data database are read. Live ingestion, news and
+company-announcement intelligence, scheduling, notifications, and financial
+BUY/SELL recommendations are deferred. No provider is activated by monitoring.
 
-> **Data paths are separate:** The adaptive-rotation strategy configuration
-> uses `./data/fmp_daily`, which is not present in this checkout. The historical
-> backtesting API instead reads the local dataset under
-> `data/historical_market_csv/`; it is not a substitute for the strategy's
-> configured input. Do not infer the historical dataset's provider,
-> redistribution permissions, or corporate-action completeness from its
-> location or file format.
+#### Exposure and concentration risk assessment (Phase 6.2A)
 
-### Configuration
+Each newly evaluated Phase 6.1 monitoring report includes a separate
+`exposure_risk_assessment` using policy `exposure-risk-v1`. It uses the same
+complete, fresh, explicitly `valuation_permitted` stored EOD valuation as the
+monitor; it performs no second price lookup and never requests or activates a
+provider. The existing valuation freshness rule (elapsed calendar days) and
+the requested session-date cutoff apply. Prices later than the session,
+missing/stale/unpermitted prices, invalid NAV, or inconsistent valuation
+totals suppress every derived exposure metric and alert.
 
-```bash
-cp .env.example .env
-```
+The initial research thresholds are centralized in the exposure-risk service
+and use strict comparisons:
 
-```bash
-# Alpaca (required for paper/live trading)
-APCA_API_KEY=your_key
-APCA_API_SECRET=your_secret
-APCA_BASE_URL=https://paper-api.alpaca.markets
+| Metric | Alert condition |
+| --- | --- |
+| One exchange-qualified listing's portfolio exposure | Greater than 25% of total NAV |
+| Five largest listings' combined exposure | Greater than 70% of total NAV |
+| Cash allocation | Less than 5% of total NAV |
+| Equity HHI | Greater than 0.18 |
 
-# Data source (optional; Yahoo Finance is the free default)
-FMP_API_KEY=your_fmp_key
-```
+These are configurable research-policy thresholds, not universal investment
+recommendations. Exactly 25%, 70%, 5%, or 0.18 does not trigger its respective
+alert. Alert severity is a policy attention label, not a prediction of loss.
 
-### Python API
+For each NSE/BSE listing, portfolio weight is listing market value divided by
+total portfolio NAV; the top-five measure sums the five largest listing market
+values before dividing by NAV. Ties are resolved by exchange and symbol.
+NSE:TCS and BSE:TCS remain separate because the account data has no verified
+issuer/ISIN mapping. Cash allocation is cash divided by total NAV. Equity HHI
+is the sum of squared listing weights normalized by total equity market value
+(cash is excluded); larger values indicate more concentrated equity
+allocations. HHI is not applicable (`null`) when there are no equity holdings.
+A positive-cash-only portfolio is evaluated with 100% cash allocation and no
+equity alerts. Since the existing valuation service rounds holding market
+values to paise, a complete valuation can contain a valid `₹0.00` holding
+when its unrounded value is below half a paise. Such a positive-quantity
+listing remains in the assessment with zero weight and does not create an
+exposure alert. Negative values or invalid quantities are rejected. A zero
+or invalid NAV is `NOT_EVALUATED`.
 
-```python
-# Data
-from src.data.data_fetcher import get_data_manager
-manager = get_data_manager()
-prices = manager.get_price_data(['AAPL', 'MSFT'], '2020-01-01', '2024-12-31')
+The risk assessment has `EVALUATED` and `NOT_EVALUATED` states, independent of
+the four Phase 6.1 monitoring statuses. An evaluated result reports NAV,
+equity and cash values, listing weights, top-five exposure, cash allocation,
+equity HHI, and deterministic alerts with a stable code, severity, observed
+value, threshold, policy version, and explanation. An unevaluated result
+contains reason codes and unavailable exchange-qualified listings, but no
+partial metrics or alerts. It is not equivalent to a successful assessment
+with no alerts.
 
-# Strategy
-from src.strategies.ml_strategy import MLStockSelectorStrategy
-strategy = MLStockSelectorStrategy(config)
-result = strategy.generate_weights(data)
+Migration `0006_portfolio_exposure_risk` adds a nullable JSON field to the
+existing monitoring report. Older reports remain unchanged and expose a null
+risk assessment; same-session retries continue to return the originally
+persisted report. The API allowlists and validates risk data before response
+model validation and does not rewrite legacy report data.
 
-# Backtest
-from src.backtest.backtest_engine import BacktestEngine, BacktestConfig
-engine = BacktestEngine(BacktestConfig(start_date='2020-01-01', end_date='2024-12-31'))
-result = engine.run_backtest("My Strategy", weights, prices)
+These alerts describe exposure only. They are not financial advice, price
+forecasts, or BUY/SELL/HOLD instructions and do not assess issuer identity,
+sector concentration, corporate actions, or price-history returns. No
+brokerage orders or automatic trades are created.
 
-# Live trade
-from src.trading.alpaca_manager import create_alpaca_account_from_env, AlpacaManager
-alpaca = AlpacaManager([create_alpaca_account_from_env()])
-alpaca.execute_portfolio_rebalance(target_weights={'AAPL': 0.3, 'MSFT': 0.7})
-```
+#### Verified issuer concentration (Phase 6.2B)
+
+Issuer concentration is a separate, metrics-only research assessment. Its
+identity chain is exchange-qualified listing (`exchange` + `symbol`) to a
+verified instrument identifier (currently `ISIN` or explicitly sourced
+`OTHER_VERIFIED`) to a canonical issuer identifier (`CIN`, `LEI`, or
+`OTHER_VERIFIED`). A CIN is not assumed to exist for every issuer. Company
+names and matching ticker text are never used to resolve or consolidate
+issuers. NSE and BSE listings remain separate traceable listing records, and
+are aggregated only when their locally curated records identify the same
+canonical issuer.
+
+The local reference file is
+[`src/services/issuer_reference_v1.json`](./src/services/issuer_reference_v1.json).
+It currently contains no mappings; it does not claim issuer coverage. Each
+record must provide exchange, symbol, instrument identifier and type, canonical
+issuer ID and type, inclusive `effective_from`/`effective_to` dates (`null`
+means no end date), `source`, `source_reference`, `verified_on`, and the matching
+`reference_data_version`. Dates are ISO `YYYY-MM-DD`; records must not overlap
+for one exchange-qualified listing, and an instrument identifier cannot map
+to different issuers over overlapping dates. Duplicate records, unsupported
+fields, malformed identifiers, and conflicting intervals make the assessment
+unavailable rather than being guessed through.
+
+The loader checks ISIN structure and its Luhn check digit, LEI structure and
+mod-97 check digits, and the 21-character CIN structure. CIN structure has no
+checksum in this validation; a matching shape does not establish that an
+identifier was issued or is current. `OTHER_VERIFIED` identifiers are opaque:
+they must be non-empty and have source, source-reference, and verification-date
+provenance, but neither the application nor these fields establish source
+authority, identifier ownership, or data-use licensing. These checks are
+format validation, not authoritative verification.
+
+To add a mapping, obtain an authoritative identifier and source whose use is
+permitted for this research, verify both the listing-to-instrument and
+instrument-to-issuer relationships, then add a record to the reference file.
+Use a new, never-reused `reference_data_version` for any content change and
+set the record's version to match. Do not infer identity from company names,
+similar symbols, or a remembered ISIN/CIN. Keep prior versions available in
+version control; monitoring reports store the version and computed listing
+and issuer result, and same-date replay returns the persisted report without
+recalculating against a changed reference file. No external provider,
+scraping, or API is used.
+
+Every positive-value holding must have exactly one verified mapping effective
+on the monitoring session date. If any positive holding is unmapped, outside
+its effective dates, or the reference data is invalid, the issuer assessment
+is `NOT_EVALUATED` and exposes no partial listing or issuer weights. An
+unmapped zero-value holding does not block assessment but remains visible as
+an unresolved listing trace. A complete cash-only portfolio is valid and has
+no issuer exposures. Issuer concentration is evaluated only when valuation
+is complete and ledger reconciliation is available and clean; an unavailable
+or discrepant reconciliation produces `NOT_EVALUATED` with no partial metrics.
+Incomplete valuation never produces partial issuer metrics. Issuer weights use
+total portfolio NAV; the assessment retains exchange-qualified listings and
+the mapping provenance used for traceability. No issuer concentration alert
+threshold has been approved, so no issuer alerts are generated. Existing
+Phase 6.2A listing thresholds and the four monitoring statuses are unchanged.
+Sector classification and sector concentration are deferred to Phase 6.2C.
+
+Migration `0007_portfolio_issuer_concentration` adds a nullable JSON assessment
+to monitoring reports. Existing reports are not backfilled. The new assessment
+is independent from Phase 6.2A's listing-level `exposure_risk_assessment`.
+
+#### Sector concentration (Phase 6.2C)
+
+Sector concentration is a separate descriptive assessment built only from the
+validated Phase 6.2B issuer assessment. It groups canonical issuers, not
+exchange listings, so NSE and BSE listings already consolidated by Phase 6.2B
+are not counted twice. It uses the same complete valuation snapshot and clean
+ledger reconciliation gate. It performs no price lookup, provider call,
+brokerage integration, or automatic trading.
+
+The local reference file is
+[`src/services/sector_reference_v1.json`](./src/services/sector_reference_v1.json).
+It declares the project-defined taxonomy `project-india-equity-sectors` version
+`1.0`, but its issuer mapping records are intentionally empty. The taxonomy is
+not represented as an NSE/BSE taxonomy. Do not copy exchange taxonomy codes or
+labels into this project without explicit reuse permission. The existing
+symbol-level sector metadata elsewhere in the repository is unverified and is
+not used for issuer sector assessment.
+
+Every future issuer mapping must identify the verified canonical issuer, one
+primary project sector, effective-from/effective-to dates, source publisher,
+source document title and URL with the relevant section/page, source
+publication date, verification date, and reference-data version. Use primary
+source annual reports or official issuer filings; keep evidence sufficient for
+another reviewer to verify the classification. A source supports a session
+date only when its publication date is on or before that date and the
+effective interval includes it. Do not infer identity or classification from
+company names, ticker text, similar names, or unverified legacy metadata.
+`DIVERSIFIED` is appropriate only where primary-source evidence supports that
+classification; it is not a fallback for missing or ambiguous evidence.
+
+If a positive-value issuer has no unique eligible mapping, sector assessment is
+`NOT_EVALUATED` and exposes no partial sector weights or metrics. Cash-only
+portfolios are valid and have no sector rows; zero-value listings remain
+traceable but do not require sector mappings to calculate exposure. Historical
+reports retain their persisted sector assessment and reference version on
+same-session replay, even after the local reference changes. Each assessment
+stores a canonical validated reference snapshot and SHA-256 fingerprint, and
+each issuer contribution is checked against its stored mapping evidence.
+Fingerprints detect inconsistency only while the original fingerprint/evidence
+remains protected; a hash alone does not prove authenticity if an attacker can
+replace both the stored snapshot and its fingerprint. Existing reports are not
+backfilled.
+
+Sector exposure percentages use total portfolio NAV. Largest-sector and
+top-three concentration are the largest one and three sector values divided by
+NAV. Sector HHI is the sum of squared sector shares of total equity value
+(cash excluded), and is null when equity value is zero. Sector weights against
+NAV may sum to less than 100% because cash is excluded. Metrics are
+descriptive; no sector alert thresholds or alerts are approved. Migration
+`0008_portfolio_sector_concentration` adds a separate nullable JSON assessment
+and does not change Phase 6.2A/6.2B fields, monitoring statuses, or report
+uniqueness.
+
+#### Portfolio-aware rebalance preview
+
+Authenticated `POST /api/portfolios/{portfolio_id}/rebalance-preview` creates
+a paper-only proposal using the account's current cash and NSE/BSE holdings,
+the existing stored-price valuation service, and the existing deterministic
+allocation engine. The default equal-weight baseline distributes `1 -
+cash_reserve_pct` equally across selected current holdings and leaves the
+configured reserve in cash. `selected_holdings` accepts exchange-qualified
+identifiers such as `NSE:TCS`; omitting it selects every current holding.
+Current holdings excluded from a selection are held at their current
+market-value weights. In custom allocations, current holdings omitted from
+`target_weights` are also preserved; a zero target must be explicit. If those
+fixed positions conflict with the requested reserve or asset caps, the request
+is rejected rather than silently proposing their sale. With no holdings and
+positive preview cash, the service returns a cash-only no-trade preview. A
+zero-NAV portfolio returns an unavailable preview.
+
+To customize targets, pass `target_weights` keyed by exchange-qualified
+current listings, and optionally pass `target_cash_weight`. Target weights
+and cash are checked and adjusted by the allocation engine's existing cash
+reserve and asset-cap constraints. The request can also set simulated cost,
+slippage, turnover, and fractional-share assumptions. `additional_investment`
+is included only in the preview cash and NAV; it is not deposited or recorded.
+
+The response preserves custom user-supplied weights separately from the full
+requested allocation (which includes default-preserved positions), then
+distinguishes that allocation from constraint-adjusted targets and final
+simulated weights and cash allocation. Allocation-adjustment events,
+listing-specific constraint events, and portfolio-level constraint events are
+reported separately. Monetary aggregate fees, slippage, and gross turnover
+are sums of the displayed paise-rounded trade amounts; the turnover ratio is
+calculated from the displayed turnover and initial NAV. Market-price dates and
+sources, proposed simulated trades,
+estimated fees/slippage, final simulated holdings and cash, aggregate gross
+turnover and turnover ratio, and a per-holding suggestion are also returned.
+`allocation_status` is `COMPLETE` only when the derived allocation is based on
+a complete permitted valuation. Otherwise it is `UNAVAILABLE`, derived
+requested/adjusted/final allocation fields are `null`, and
+`allocation_unavailable_reason` explains that preserved weights cannot be
+calculated. Explicit user-entered weights remain available in
+`user_target_weights`, but are not a complete portfolio allocation.
+Each simulated holding result reports an intended BUY/SELL/HOLD
+or UNAVAILABLE action separately from execution status, along with target and
+simulated values, relevant constraint messages, and estimated listing-level
+fees/slippage. HOLD means current quantity matches the constrained target
+within the larger of 1e-10 shares and half the configured fractional share
+step (whole-share mode uses 1e-10). A constrained intended action remains BUY or
+SELL even when no trade or only a partial trade is simulated. If any current holding lacks
+a sufficiently fresh permitted EOD price, the endpoint returns
+`preview_available: false`, categorized price warnings, and no proposed
+trades; affected holdings are marked UNAVAILABLE rather than HOLD. A rejected
+plan likewise has UNAVAILABLE per-holding simulation results. Custom and selected listings must already be holdings; the endpoint
+does not yet accept new securities. A preview never changes account cash,
+holdings, or transaction history and never submits brokerage orders. These
+simulated suggestions are not financial advice and are not executable trade
+instructions.
+Monetary response values are rounded to INR paise (two decimal places).
+Simulated values are estimates based on stored EOD closes and configured
+execution assumptions; they are not executable quotes or exact settlement
+calculations.
 
 ### Historical CSV backtesting API
 
-The read-only FastAPI app also exposes a separate historical research path
+The FastAPI application also exposes a separate historical research path
 that loads `data/historical_market_csv/` through `load_market_data` and the
 CSV-backed `PortfolioTradingEnv`. It does not use SQLite, fetch market data,
 load the synthetic PPO model, or submit trades.
@@ -353,50 +565,43 @@ corporate-action-complete or total-return accurate. The existing allocation
 configuration defaults transaction fees and slippage to zero; response totals
 reflect those settings rather than estimated costs.
 
-**Historical-data status: NO-GO for PPO training or validated performance
-claims.** Provider provenance and redistribution permissions have not been
-established, and corporate-action coverage remains unverified.
+Historical CSV results are paper simulations, not investment recommendations
+or evidence of NSE/BSE or other real-market performance. Provider provenance
+and redistribution permissions have not been established, and
+corporate-action coverage remains unverified. These CSV results are separate
+from the synthetic PPO experiment.
 
----
+### Phase 8A synthetic research API
 
-## Evolution from FinRL
+Phase 8A exposes read-only views of the completed, frozen Phase 7.2 synthetic
+experiment through these authenticated GET endpoints:
 
-| | FinRL (2020) | FinRL-X (2026) |
-|:---|:---|:---|
-| **Paradigm** | DRL-only | AI-Native (ML + DRL + LLM-ready) |
-| **Architecture** | Coupled monolith | Decoupled modular layers |
-| **Interface** | Gym state/action spaces | Weight-centric contract |
-| **Data** | 14 manual processors | Auto-select: Yahoo / FMP / WRDS |
-| **Backtesting** | Hand-rolled loops | `bt` engine + multi-benchmark |
-| **Live Trading** | Basic Alpaca | Multi-account + risk controls |
-| **Config** | `config.py` | Pydantic + `.env` |
-| **Paper** | [arXiv:2011.09607](https://arxiv.org/abs/2011.09607) | [arXiv:2603.21330](https://arxiv.org/abs/2603.21330) |
+- `/api/research/phase7-2/status`
+- `/api/research/phase7-2/selection`
+- `/api/research/phase7-2/validation`
+- `/api/research/phase7-2/final-test`
+- `/api/research/phase7-2/final-test/seeds`
+- `/api/research/phase7-2/integrity`
 
-### Migration from FinRL
+Every request uses the shared account `get_current_user` authentication
+dependency. Authentication requires the account database to be ready; if that
+database is unavailable, these research routes also return HTTP 503.
+Artifact verification or read failures produce a separate generic research
+HTTP 503 response.
 
-```
-FinRL                                →  FinRL-X
-─────────────────────────────────────────────────────────────
-finrl/meta/data_processor.py         →  src/data/data_fetcher.py
-finrl/train.py                       →  strategy.generate_weights()
-finrl/trade.py                       →  TradeExecutor.execute_portfolio_rebalance()
-config.py + config_tickers.py        →  src/config/settings.py (Pydantic + .env)
-gym.Env subclassing                  →  BaseStrategy.generate_weights()
-```
+The API constructs a fresh research-store instance and verifies the stored
+artifacts before reading a response. It expects the complete frozen Phase 7.2
+artifact set under the fixed project path `.artifacts/phase7_2`; no
+caller-supplied artifact path is accepted. The frozen artifact set must be
+provisioned at that path. If it is absent or fails verification, the API does
+not serve partial results.
 
----
-
-## Comparison with Existing Platforms
-
-| Feature | FinRL-X | [Qlib](https://github.com/microsoft/qlib) | [TradingAgents](https://github.com/TauricResearch/TradingAgents) | [Zipline](https://github.com/quantopian/zipline)/[Backtrader](https://github.com/mementum/backtrader) | [QuantConnect Lean](https://github.com/QuantConnect/Lean) |
-|:--------|:-------:|:----:|:-------------:|:------------------:|:-----------------:|
-| Primary Orientation | End-to-End System | ML Research | Agent-Based Trading | Backtesting | End-to-End Platform |
-| Broker Integration | Yes | - | - | - | Yes |
-| Deployment-Consistent Interface | Yes | - | - | - | Partial |
-| Reinforcement Learning Support | Yes | Limited | Yes | - | Partial |
-| Modular Strategy Pipeline | Yes | - | - | - | Partial |
-| Portfolio-Level Risk Overlay | Yes | - | - | - | Partial |
-| Open Source License | Apache 2.0 | MIT | Apache 2.0 | Apache 2.0 | Apache 2.0 |
+The research API does not load PPO models, train models, run inference, or
+execute backtests. It only returns verified stored synthetic experiment
+summaries. These metrics must not be described as NSE/BSE or real-market
+performance. The Phase 8A API is separate from the account, market-data, and
+historical CSV backtest functionality. The dashboard remains teammate-owned
+and is not modified or connected to this API.
 
 ---
 

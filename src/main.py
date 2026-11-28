@@ -16,6 +16,7 @@ if __package__:
     from .utils.logging_utils import setup_logging
 else:
     sys.path.insert(0, str(Path(__file__).parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from config.settings import get_config
     from utils.logging_utils import setup_logging
 
@@ -75,9 +76,9 @@ def main():
         if args.command == 'dashboard':
             import uvicorn
             if __package__:
-                from .web.server import app
+                from .api.analytics_api import app
             else:
-                from web.server import app
+                from src.api.analytics_api import app
 
             logger.info("Starting dashboard at http://%s:%s", config.web.host, config.web.port)
             uvicorn.run(

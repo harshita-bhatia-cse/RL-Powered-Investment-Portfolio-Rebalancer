@@ -312,11 +312,7 @@ def generate_synthetic_market(
     benchmark_returns = simple_returns[:, -1].copy()
     _mark_read_only(asset_returns, benchmark_returns, vix_levels)
     config_payload = _config_to_json(selected_config)
-    config_hash = hashlib.sha256(
-        json.dumps(config_payload, sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        )
-    ).hexdigest()
+    config_hash = synthetic_configuration_hash(selected_config)
     metadata: dict[str, object] = {
         "source_type": "synthetic",
         "synthetic": True,
@@ -464,6 +460,17 @@ def _validate_seed(seed: int) -> int:
 
 def _config_to_json(config: SyntheticMarketConfig) -> dict[str, object]:
     return asdict(config)
+
+
+def synthetic_configuration_hash(config: SyntheticMarketConfig) -> str:
+    """Return the canonical SHA-256 used to bind generated data to its config."""
+    config.validate()
+    payload = json.dumps(
+        _config_to_json(config),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _mark_read_only(*arrays: np.ndarray) -> None:

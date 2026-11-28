@@ -37,8 +37,8 @@ data/
 logs/
 *.db
 *.sqlite
-.env
-.env.local
+.env*
+**/.env*
 
 # Documentation
 docs/_build/

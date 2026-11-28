@@ -5,7 +5,7 @@ services:
     build: .
     container_name: finrl-trading-app
     ports:
-      - "8501:8501"
+      - "127.0.0.1:8501:8501"
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
@@ -26,18 +26,19 @@ services:
       - finrl-network
 
   # Optional: PostgreSQL database for production use
+  # Set POSTGRES_PASSWORD in the environment or private .env before enabling this profile.
   postgres:
     image: postgres:15-alpine
     container_name: finrl-postgres
     environment:
       POSTGRES_DB: finrl_trading
       POSTGRES_USER: finrl_user
-      POSTGRES_PASSWORD: finrl_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init-db:/docker-entrypoint-initdb.d
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     profiles:
       - production
     networks:
@@ -47,8 +48,6 @@ services:
   redis:
     image: redis:7-alpine
     container_name: finrl-redis
-    ports:
-      - "6379:6379"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes

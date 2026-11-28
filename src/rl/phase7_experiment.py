@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
+import stat
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
@@ -29,10 +33,16 @@ from src.rl.synthetic_data import (
     GENERATOR_VERSION,
     RegimeConfig,
     SyntheticMarketConfig,
+    synthetic_configuration_hash,
 )
 
 PROTOCOL_ID = "phase7_2_synthetic_ppo_comparison"
 PROTOCOL_VERSION = 1
+PHASE72_SELECTION_TOLERANCE = 1e-12
+# Update this reviewed value only alongside an explicitly approved protocol change.
+APPROVED_PROTOCOL_CANONICAL_SHA256 = (
+    "7e8b86648c93f07600474583e1fa197ee060de2118e12ec23ee877e946c164ca"
+)
 CONFIGURATIONS = ("A", "B", "C")
 TRAINING_SEEDS = (101, 202, 303, 404, 505)
 VALIDATION_ROOTS = tuple(range(7201, 7221))
@@ -45,6 +55,7 @@ _PROVENANCE_FIELDS = (
     "generated_at_utc",
     "generation_config",
 )
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
 
 @dataclass(frozen=True)
@@ -58,6 +69,7 @@ class Phase72Run:
     randomize_training_horizons: bool
     horizon_seed: int | None
     reservation_token: str | None = None
+    attempt_id: str | None = None
 
 
 def default_protocol_path() -> Path:
@@ -66,6 +78,27 @@ def default_protocol_path() -> Path:
         / "configs"
         / "phase7_2_experiment_protocol.json"
     )
+
+
+def _path_is_reparse_point(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    return stat.S_ISLNK(metadata.st_mode) or bool(
+        attributes & _FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _path_has_reparse_component(path: Path) -> bool:
+    current = path.absolute()
+    while True:
+        if _path_is_reparse_point(current):
+            return True
+        if current.parent == current:
+            return False
+        current = current.parent
 
 
 def load_phase72_protocol(
@@ -81,6 +114,16 @@ def load_phase72_protocol(
         raise ValueError("experiment protocol must be a JSON object")
     validate_phase72_protocol(protocol)
     return protocol
+
+
+def phase72_synthetic_config(
+    protocol: Mapping[str, Any],
+) -> SyntheticMarketConfig:
+    """Return the validated generator configuration declared by the protocol."""
+    validate_phase72_protocol(protocol)
+    return _synthetic_config_from_json(
+        protocol["shared_settings"]["synthetic_generator"]
+    )
 
 
 def validate_phase72_protocol(protocol: Mapping[str, Any]) -> None:
@@ -163,6 +206,18 @@ def validate_phase72_protocol(protocol: Mapping[str, Any]) -> None:
         role_values["training_seeds"],
         generator=generator,
     )
+    canonical = json.dumps(
+        protocol,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    if hashlib.sha256(canonical).hexdigest() != APPROVED_PROTOCOL_CANONICAL_SHA256:
+        raise ValueError(
+            "protocol contents do not match the approved Phase 7.2 protocol; "
+            "update the reviewed canonical checksum with an approved protocol change"
+        )
 
 
 def build_phase72_run_matrix(
@@ -250,19 +305,49 @@ def reserve_phase72_output_directories(
     output_root: str | Path,
     repository_root: str | Path,
 ) -> tuple[Phase72Run, ...]:
-    """Preflight every run path, then create all unique empty run directories."""
+    """Atomically reserve the output tree and roll back only this attempt's empties."""
     runs = build_phase72_run_matrix(
         protocol,
         output_root=output_root,
         repository_root=repository_root,
     )
-    existing = [run.output_directory for run in runs if run.output_directory.exists()]
-    if existing:
-        raise FileExistsError(
-            f"refusing to reserve an existing run directory: {existing[0]}"
-        )
-    for run in runs:
-        run.output_directory.mkdir(parents=True, exist_ok=False)
+    root = Path(output_root).resolve()
+    created: list[Path] = []
+    missing_parents: list[Path] = []
+    parent = root.parent
+    while not parent.exists():
+        missing_parents.append(parent)
+        parent = parent.parent
+    try:
+        for directory in reversed(missing_parents):
+            directory.mkdir()
+            created.append(directory)
+        root.mkdir(exist_ok=False)
+        created.append(root)
+        for run in runs:
+            configuration_directory = run.output_directory.parent
+            if not configuration_directory.exists():
+                configuration_directory.mkdir()
+                created.append(configuration_directory)
+            run.output_directory.mkdir(exist_ok=False)
+            created.append(run.output_directory)
+    except Exception as error:
+        cleanup_errors: list[OSError] = []
+        for directory in reversed(created):
+            try:
+                directory.rmdir()
+            except FileNotFoundError:
+                continue
+            except OSError as cleanup_error:
+                cleanup_errors.append(cleanup_error)
+        if cleanup_errors:
+            raise RuntimeError(
+                "Phase 7.2 reservation failed and some invocation-created "
+                "directories could not be removed because they were not empty or "
+                "became inaccessible; inspect: "
+                + ", ".join(str(directory) for directory in created)
+            ) from error
+        raise
     reservation_token = uuid4().hex
     return tuple(
         replace(run, reservation_token=reservation_token)
@@ -300,13 +385,48 @@ def validate_phase72_run_directory(
         raise ValueError("run plan settings do not match the protocol")
     if len(run.output_directory.parents) < 2:
         raise ValueError("run plan output directory has an invalid structure")
-    output_root = run.output_directory.parents[1].resolve()
-    expected_directory = (
-        output_root
-        / f"config_{run.configuration}"
-        / f"seed_{run.training_seed}"
-    ).resolve()
-    if run.output_directory.resolve() != expected_directory:
+    if run.attempt_id is None:
+        output_root = run.output_directory.parents[1].resolve()
+        expected_directory = (
+            output_root
+            / f"config_{run.configuration}"
+            / f"seed_{run.training_seed}"
+        ).resolve()
+    else:
+        if run.attempt_id != "attempt_0002":
+            raise ValueError("run plan attempt id is not authorized")
+        if len(run.output_directory.parents) < 4:
+            raise ValueError("retry run plan output directory has an invalid structure")
+        retry_output_root = run.output_directory.parents[3]
+        output_root = retry_output_root.resolve()
+        retry_components = (
+            retry_output_root,
+            retry_output_root / "retries",
+            retry_output_root / "retries" / run.attempt_id,
+            retry_output_root
+            / "retries"
+            / run.attempt_id
+            / f"config_{run.configuration}",
+            run.output_directory,
+        )
+        if _path_has_reparse_component(run.output_directory) or any(
+            _path_is_reparse_point(component) for component in retry_components
+        ):
+            raise ValueError("retry run plan path may not contain reparse points")
+        expected_directory = (
+            output_root
+            / "retries"
+            / run.attempt_id
+            / f"config_{run.configuration}"
+            / f"seed_{run.training_seed}"
+        )
+        try:
+            run.output_directory.resolve(strict=False).relative_to(
+                output_root.resolve(strict=False)
+            )
+        except ValueError as error:
+            raise ValueError("retry run plan path escapes its approved output root") from error
+    if run.output_directory.resolve(strict=False) != expected_directory.resolve(strict=False):
         raise ValueError("run plan output path does not match its configuration and seed")
 
     artifacts_root = (Path(repository_root).resolve() / ".artifacts").resolve()
@@ -344,6 +464,35 @@ def build_phase72_run_metadata(
 
     specification = protocol["configurations"][configuration]
     normalized_provenance = _normalize_json(training_provenance)
+    if any(field not in normalized_provenance for field in _PROVENANCE_FIELDS):
+        raise ValueError("training provenance is missing manifest provenance fields")
+    expected_config = _synthetic_config_from_json(
+        protocol["shared_settings"]["synthetic_generator"]
+    )
+    expected_config_payload = asdict(expected_config)
+    received_config_payload = normalized_provenance.get("generation_config")
+    if not isinstance(received_config_payload, Mapping):
+        raise ValueError("training provenance generation_config must be an object")
+    if _generation_config_only(received_config_payload) != _normalize_json(
+        expected_config_payload
+    ):
+        raise ValueError("training provenance generation_config differs from protocol")
+    configuration_hash = normalized_provenance.get("configuration_hash")
+    if (
+        not isinstance(configuration_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", configuration_hash) is None
+        or configuration_hash != synthetic_configuration_hash(expected_config)
+    ):
+        raise ValueError("training provenance configuration_hash is invalid")
+    generated_at = normalized_provenance.get("generated_at_utc")
+    if not isinstance(generated_at, str):
+        raise ValueError("training provenance generated_at_utc must be an ISO timestamp")
+    try:
+        parsed_generated_at = datetime.fromisoformat(generated_at)
+    except ValueError as error:
+        raise ValueError("training provenance generated_at_utc is invalid") from error
+    if parsed_generated_at.tzinfo is None or parsed_generated_at.utcoffset() is None:
+        raise ValueError("training provenance generated_at_utc must include a timezone")
     if (
         normalized_provenance.get("source_type") != "synthetic"
         or normalized_provenance.get("synthetic") is not True
@@ -358,8 +507,6 @@ def build_phase72_run_metadata(
         )
     ):
         raise ValueError("training provenance does not match the protocol synthetic training split")
-    if not isinstance(normalized_provenance.get("configuration_hash"), str):
-        raise ValueError("training provenance must include a configuration hash")
     _require_seed(normalized_provenance.get("seed"), "training data seed")
     expected_training_data_seed = int(
         np.random.SeedSequence(training_seed, spawn_key=(0,)).generate_state(
@@ -373,8 +520,6 @@ def build_phase72_run_metadata(
         != f"train-{expected_training_data_seed}"
     ):
         raise ValueError("training provenance does not match the configured root seed")
-    if any(field not in normalized_provenance for field in _PROVENANCE_FIELDS):
-        raise ValueError("training provenance is missing manifest provenance fields")
     normalized_provenance = {
         "source_type": "synthetic",
         "synthetic": True,

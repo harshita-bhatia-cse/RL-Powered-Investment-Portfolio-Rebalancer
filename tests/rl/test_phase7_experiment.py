@@ -1,7 +1,10 @@
 import copy
+import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from src.rl.environment.synthetic_portfolio_env import SyntheticPortfolioEnv
 from src.rl.phase4_training import TrainingOrchestrator
@@ -9,11 +12,13 @@ from src.rl.phase7_experiment import (
     CONFIGURATIONS,
     OBSERVATION_SCHEMA_WITHOUT_TIME,
     OBSERVATION_SCHEMA_VERSION,
+    Phase72Run,
     build_phase72_run_matrix,
     build_phase72_run_metadata,
     load_phase72_protocol,
     reserve_phase72_output_directories,
     validate_phase72_protocol,
+    validate_phase72_run_directory,
     validate_phase72_run_metadata,
 )
 from src.rl.ppo_config import PPOConfig, TrainingOptions
@@ -56,12 +61,81 @@ class Phase72ExperimentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not overlap"):
             validate_phase72_protocol(overlapping)
 
+    def test_retry_run_directory_rejects_reparse_point_components(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = Path(temporary_directory)
+            output_root = repository / ".artifacts" / "phase7_2"
+            retry_root = output_root / "retries"
+            specification = self.protocol["configurations"]["A"]
+            run = Phase72Run(
+                configuration="A",
+                training_seed=101,
+                output_directory=(
+                    retry_root / "attempt_0002" / "config_A" / "seed_101"
+                ),
+                observation_schema=specification["observation_schema"],
+                randomize_training_horizons=specification[
+                    "randomize_training_horizons"
+                ],
+                horizon_seed=None,
+                reservation_token="reservation",
+                attempt_id="attempt_0002",
+            )
+            with patch(
+                "src.rl.phase7_experiment._path_is_reparse_point",
+                side_effect=lambda path: path == retry_root,
+            ), self.assertRaisesRegex(ValueError, "reparse points"):
+                validate_phase72_run_directory(
+                    self.protocol,
+                    run,
+                    repository_root=repository,
+                )
+
         configuration_override = copy.deepcopy(self.protocol)
         configuration_override["configurations"]["B"]["ppo_settings"] = {
             "gamma": 0.9
         }
         with self.assertRaisesRegex(ValueError, "exactly"):
             validate_phase72_protocol(configuration_override)
+
+    def test_same_id_and_version_protocol_mutations_are_rejected(self):
+        mutations = (
+            lambda protocol: protocol["shared_settings"]["training_budget"].update(
+                {"requested_total_timesteps": 10_241}
+            ),
+            lambda protocol: protocol["shared_settings"]["ppo_settings"].update(
+                {"gamma": 0.9}
+            ),
+            lambda protocol: protocol["shared_settings"]["evaluation"].update(
+                {"evaluation_sessions": 672}
+            ),
+            lambda protocol: protocol["seed_roles"]["validation_scenario_roots"].__setitem__(
+                0, 7301
+            ),
+            lambda protocol: protocol["configurations"]["B"].update(
+                {"randomize_training_horizons": False}
+            ),
+        )
+        for mutate in mutations:
+            changed = copy.deepcopy(self.protocol)
+            mutate(changed)
+            self.assertEqual(changed["protocol_id"], self.protocol["protocol_id"])
+            self.assertEqual(
+                changed["protocol_version"], self.protocol["protocol_version"]
+            )
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                validate_phase72_protocol(changed)
+
+    def test_custom_protocol_path_cannot_bypass_approved_contents(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "modified-protocol.json"
+            changed = copy.deepcopy(self.protocol)
+            changed["shared_settings"]["training_budget"][
+                "requested_total_timesteps"
+            ] += 1
+            path.write_text(json.dumps(changed), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "approved Phase 7.2 protocol"):
+                load_phase72_protocol(path)
 
     def test_output_matrix_is_unique_and_reserves_all_paths_only_after_preflight(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -94,6 +168,89 @@ class Phase72ExperimentTests(unittest.TestCase):
             )
             self.assertEqual(len(reserved), 15)
             self.assertTrue(all(plan.output_directory.is_dir() for plan in reserved))
+
+    def test_concurrent_reservations_cannot_claim_the_same_tree(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = Path(temporary_directory) / "repo"
+            output_root = repository / ".artifacts" / "phase7_2"
+            barrier = threading.Barrier(2)
+            from src.rl import phase7_experiment
+
+            original_builder = phase7_experiment.build_phase72_run_matrix
+
+            def synchronized_builder(*args, **kwargs):
+                runs = original_builder(*args, **kwargs)
+                barrier.wait(timeout=5)
+                return runs
+
+            outcomes = []
+            errors = []
+
+            def reserve():
+                try:
+                    outcomes.append(
+                        reserve_phase72_output_directories(
+                            self.protocol,
+                            output_root=output_root,
+                            repository_root=repository,
+                        )
+                    )
+                except Exception as error:
+                    errors.append(error)
+
+            with patch(
+                "src.rl.phase7_experiment.build_phase72_run_matrix",
+                side_effect=synchronized_builder,
+            ):
+                workers = [threading.Thread(target=reserve) for _ in range(2)]
+                for worker in workers:
+                    worker.start()
+                for worker in workers:
+                    worker.join(timeout=10)
+            self.assertTrue(all(not worker.is_alive() for worker in workers))
+            self.assertEqual(len(outcomes), 1)
+            self.assertEqual(len(errors), 1)
+            error = errors[0]
+            self.assertTrue(
+                isinstance(error, FileExistsError)
+                or (
+                    isinstance(error, RuntimeError)
+                    and "reservation failed" in str(error)
+                ),
+                repr(error),
+            )
+            winning_directories = {run.output_directory for run in outcomes[0]}
+            actual_directories = set(output_root.glob("config_*/seed_*"))
+            self.assertEqual(len(winning_directories), 15)
+            self.assertEqual(actual_directories, winning_directories)
+            self.assertTrue(all(path.is_dir() for path in winning_directories))
+
+    def test_failed_partial_reservation_rolls_back_only_empty_created_paths(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = Path(temporary_directory) / "repo"
+            output_root = repository / ".artifacts" / "phase7_2"
+            original_mkdir = Path.mkdir
+
+            def fail_on_second_config(path, *args, **kwargs):
+                if path == output_root / "config_B":
+                    raise OSError("injected reservation failure")
+                return original_mkdir(path, *args, **kwargs)
+
+            with patch.object(Path, "mkdir", fail_on_second_config):
+                with self.assertRaisesRegex(OSError, "injected reservation failure"):
+                    reserve_phase72_output_directories(
+                        self.protocol,
+                        output_root=output_root,
+                        repository_root=repository,
+                    )
+            self.assertFalse(output_root.exists())
+            self.assertFalse((repository / ".artifacts").exists())
+            reserved = reserve_phase72_output_directories(
+                self.protocol,
+                output_root=output_root,
+                repository_root=repository,
+            )
+            self.assertEqual(len(reserved), 15)
 
     def test_nonempty_run_directory_is_rejected_before_other_paths_are_created(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

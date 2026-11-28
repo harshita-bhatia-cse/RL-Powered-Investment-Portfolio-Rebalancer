@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "reference_data_version": "india-sector-reference-v1",
+  "taxonomy": {
+    "name": "project-india-equity-sectors",
+    "version": "1.0",
+    "sectors": [
+      {"code": "BANKING_FINANCE", "name": "Banking and Financial Services"},
+      {"code": "CONSUMER", "name": "Consumer Products and Services"},
+      {"code": "ENERGY_UTILITIES", "name": "Energy and Utilities"},
+      {"code": "HEALTHCARE", "name": "Healthcare and Life Sciences"},
+      {"code": "INDUSTRIALS", "name": "Industrial Products and Services"},
+      {"code": "MATERIALS", "name": "Materials and Natural Resources"},
+      {"code": "TECHNOLOGY", "name": "Technology and Digital Services"},
+      {"code": "TELECOM_MEDIA", "name": "Telecommunications and Media"},
+      {"code": "TRANSPORT_LOGISTICS", "name": "Transportation and Logistics"},
+      {"code": "DIVERSIFIED", "name": "Diversified"}
+    ]
+  },
+  "records": []
+}

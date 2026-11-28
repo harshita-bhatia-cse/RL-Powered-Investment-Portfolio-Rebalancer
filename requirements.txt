@@ -17,6 +17,7 @@ seaborn>=0.12.0
 # Web API and static dashboard
 fastapi>=0.115.0
 uvicorn>=0.30.0
+python-multipart>=0.0.9
 
 # Financial data sources
 yfinance>=0.2.0

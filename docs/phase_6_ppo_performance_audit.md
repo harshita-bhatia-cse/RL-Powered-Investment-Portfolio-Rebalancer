@@ -2,12 +2,12 @@
 
 ## Scope and evidence
 
-The previously requested Phase 6 audit file was not present when this task
-started. This document consolidates the relevant audit findings and records
-Phase 6.1. No PPO training or historical-data access occurred. The existing
-seed-42 model was run once in deterministic synthetic validation solely to
-produce diagnostics; the existing `evaluation.json` baseline was byte-for-byte
-preserved.
+This document records the Phase 6.1 PPO performance audit and allocation
+diagnostics, along with the later Phase 7.2 synthetic experiment protocol and
+Phase 8A read-only research API. The Phase 6.1 audit did not train PPO or
+access historical data. The existing seed-42 model was run once in deterministic
+synthetic validation solely to produce diagnostics; the existing
+`evaluation.json` baseline was byte-for-byte preserved.
 
 The saved evaluation uses 693 sessions after a 63-session warm-up, 33 rebalance
 decisions, $100,000 initial capital, a 0.1% transaction fee, and 5 bps
@@ -154,12 +154,18 @@ verified unchanged.
 
 ## Remaining limitations
 
-Diagnostics cover rebalance-point observations and allocations, not daily
-marked allocation history or training learning curves. Evaluation remains one
-seed and one validation path. A controlled multi-seed synthetic robustness
-study is still needed before making policy-quality claims.
+These Phase 6.1 diagnostics cover rebalance-point observations and
+allocations, not daily marked allocation history or training learning curves.
+That Phase 6 evaluation used one seed and one validation path; its limits are
+not changed by the later, separate Phase 7.2 multi-seed synthetic experiment.
+Neither evaluation establishes real-market performance or policy quality
+beyond its tested scenarios.
 
-## Phase 7.0 — Configuration B randomized training horizons
+## Earlier synthetic PPO configuration option: randomized training horizons
+
+The configuration notes in this section are not separate Phase 7 sub-phases.
+Phase 7.2 is the only implemented Phase 7 sub-phase; Phase 7.1 is not part of
+this project.
 
 The optional `RandomizedEpisodeHorizonEnv` wrapper is applied only to the
 synthetic training split by `build_ppo_environments()`. It samples an inclusive
@@ -173,10 +179,10 @@ Use the explicit training command
 `python -m scripts.train_synthetic_ppo_dashboard --randomized-training-horizons`
 to opt in. This mode defaults to the separate
 `.artifacts/ppo_randomized_horizon/seed42` directory and refuses to write
-inside `.artifacts/ppo` or over a non-empty experiment directory. No model was
-trained for this implementation task.
+inside `.artifacts/ppo` or over a non-empty experiment directory. This is a
+synthetic PPO configuration option and does not imply real-market evaluation.
 
-## Phase 7.0 — Configuration C without time remaining
+## Earlier synthetic PPO configuration option: observation schema
 
 The default observation schema remains
 `synthetic_portfolio_v1_with_time` (43 features). The opt-in
@@ -191,8 +197,9 @@ Select the no-time schema with
 This mode defaults to `.artifacts/ppo_without_time/seed42`, requires a new or
 empty output directory, and refuses paths inside `.artifacts/ppo` or
 `.artifacts/ppo_randomized_horizon`. Configuration B randomized horizons and
-Configuration C are deliberately rejected together. No model was trained for
-this implementation task.
+Configuration C are deliberately rejected together. This describes a
+synthetic PPO configuration option, not a separate Phase 7 sub-phase or
+real-market evaluation.
 
 ## Phase 7.2 — Experiment protocol and safe run planning
 
@@ -204,11 +211,191 @@ settings, costs, initial capital, and the 693-session/33-decision evaluation
 window. B uses complete horizons of 11–33 decisions and records one sampler
 seed per training seed.
 
-`src/rl/phase7_experiment.py` validates the protocol and seed-role separation,
-plans a unique `.artifacts/phase7_2/config_<A|B|C>/seed_<n>` directory for
-each run, and can reserve the full set of output directories only after
-checking all paths. It refuses to use `.artifacts/ppo`. Run metadata is
-validated against the protocol before a Phase 7.2 `TrainingOrchestrator` call
-and is copied into the model manifest and experiment metadata. This work adds
-preparation only; no model training, validation evaluation, or test evaluation
-has been performed.
+`src/rl/phase7_experiment.py` validates the protocol against a reviewed
+canonical SHA-256, plans a unique
+`.artifacts/phase7_2/config_<A|B|C>/seed_<n>` directory for each run, and
+reserves the output tree transactionally. A failed reservation removes only
+empty directories created by that attempt. It refuses to use `.artifacts/ppo`.
+Training provenance is checked against the protocol's generator configuration
+and the generator's recomputed canonical configuration hash before it is
+copied into the model manifest and experiment metadata. Updating the approved
+protocol requires an intentional checksum update in the validator. These
+protocol settings and runner behavior describe the experiment design; they do
+not, by themselves, establish that an experiment completed. The recorded
+Phase 7.2 experiment outcome is that all 15 configuration/seed runs were
+trained, 300 validation results were recorded, Configuration A was selected,
+and 100 reserved-test evaluations were recorded. These outputs are synthetic
+experiment results only, not NSE/BSE or real-market performance.
+
+### Phase 7.2 staged runner
+
+`src/rl/phase7_runner.py` and `scripts/run_phase7_experiment.py` provide
+separate `plan`, `train`, `validate`, and `test` stages. The runner consumes the
+checked-in protocol without changing its seeds, model settings, environment
+assumptions, or evaluation horizons. It generates only the training scenario
+during training; the twenty validation roots are generated only during
+validation, and the twenty reserved-test roots are generated only after a
+selection manifest has been frozen.
+
+Validation evaluates all fifteen configuration/seed candidates on all twenty
+validation roots. It computes a mean Sharpe ratio across roots per seed and then
+averages all five seed-level values for each configuration. Selection chooses
+the highest configuration mean, with a named tolerance of `1e-12`; ties are
+resolved by the lowest mean maximum-drawdown magnitude, then lowest mean
+turnover, then lexicographically smallest configuration ID. The stored
+`maximum_drawdown` metric is non-positive, so the tie-break uses its absolute
+magnitude to select the smaller drawdown rather than the numerically smaller,
+worse negative value. All five seeds are retained for configuration comparison
+and, for the selected configuration only, final evaluation.
+
+The final test stage requires the validated selection and checks its manifest,
+the completed validation result matrix, and all selected model checksums before
+evaluating exactly five models against the twenty reserved roots. Those one
+hundred held-out results are reports only; they are not fed back into selection.
+Stage locks use one exclusive-create operation for ownership and record host,
+stable machine identity, PID, process creation identity, timestamp, and
+invocation token. Automatic stale-lock recovery is disabled: an existing,
+malformed, remote, or otherwise unverifiable lock always fails closed and
+requires manual inspection. On Windows, the creator retains a native file
+handle opened without delete sharing for the full stage. Release verifies
+ownership through that handle, confirms the path still identifies the same
+file, then marks that handle's file for deletion by handle. The held share mode
+prevents another process from renaming or replacing the lock path between
+verification and deletion; release never unlinks the pathname. If safe
+handle-based release is unavailable, the runner refuses lock acquisition
+instead of falling back to a check-then-unlink sequence. The runner verifies
+the volume filesystem with `GetVolumeInformationW` and allows only NTFS;
+unknown, empty, query-failure, ReFS, and other filesystem results fail closed.
+Consequently, race-safe stage-lock execution is currently supported only on
+local fixed Windows NTFS volumes that honor these handle-sharing semantics.
+Network, removable, unknown, OneDrive-synchronized, and unsupported
+filesystems remain rejected.
+Other synchronization products may not be detectable and must not be used for
+concurrent experiment execution. This does not provide a distributed lock
+guarantee for shared or synchronized folders.
+Result JSON and its checksum sidecar are created without
+overwriting; the stage manifest is atomically updated and protected by a
+canonical SHA-256 integrity check. These hashes detect inconsistency when the
+trusted original evidence remains protected; they do not prove authenticity.
+Completed training/evaluation results can be reused only after their protocol,
+model, metadata, parameter, result, and sidecar checks pass. Partial or failed
+training is not automatically retried; incomplete validation and test stages
+may resume from individually verified result files. A completed final-test
+replay rechecks the exact 100 result references and their sidecars against the
+frozen selection before returning the existing report; it never regenerates
+completed results.
+
+The runner has separate commands for each stage:
+
+```powershell
+python -m scripts.run_phase7_experiment plan
+python -m scripts.run_phase7_experiment train
+python -m scripts.run_phase7_experiment validate
+python -m scripts.run_phase7_experiment test
+```
+
+`plan` reserves `.artifacts/phase7_2` and creates the run manifest; it refuses
+an already-existing output root. The `train`, `validate`, and `test` commands
+perform PPO training, validation, and final held-out evaluation, respectively.
+The approved run is complete and its outputs are frozen. Do not rerun these
+commands against the frozen artifact root. Synthetic metrics from this
+experiment are not real-market investment performance.
+
+### Explicit recovery of the failed Phase 7.2 A/101 run
+
+The completed experiment used one explicitly authorized retry for
+configuration A, training seed 101, as attempt `attempt_0002`. Attempt 1
+remains recorded as failed; attempt 2 is the active run. The retry command is
+not reproduced here as an instruction to rerun against frozen outputs.
+
+The retry uses
+`.artifacts/phase7_2/retries/attempt_0002/config_A/seed_101/`. It never
+reuses or cleans the canonical `config_A/seed_101/` directory. Before
+authorization, the runner checks the NTFS/OneDrive/network guard, holds the
+normal stage lock, verifies the protocol and manifest, requires the original
+run to be marked failed and empty, and refuses pre-existing retry paths or
+recovery-event records. It creates the retry output directory exclusively
+and writes the recovery event using create-new semantics. Retry and recovery
+paths reject Windows reparse points, including directory junctions, at every
+path component and verify that the resolved destination remains beneath the
+approved experiment output root.
+
+These checks are fail-closed for pre-existing redirection, but they do not
+provide a handle-pinned defense against a hostile process that can replace
+directories concurrently between validation and filesystem operations. Run
+the retry only in a trusted workspace without concurrent external filesystem
+mutation; the stage lock coordinates runner processes, not arbitrary local
+processes.
+
+The recovery event records the original manifest digest, the complete
+historical failed A/101 entry, the fixed retry identity and path, its unique
+reservation token, the unchanged protocol digest, timestamp, and operator
+reason. The event and its digest are linked from a v2 manifest. Attempt 1
+remains recorded as failed; attempt 2 progresses through `planned`,
+`training`, then `trained` or `failed`. Attempt 2 becomes active only after
+the normal model, experiment metadata, synthetic provenance, timestep, and
+checksum checks pass. A failed retry is not retried automatically.
+
+The v1 reader retains canonical-path behavior for existing planned,
+interrupted, selected, and completed manifests. Only the explicit retry
+operation converts the eligible A/101 interrupted manifest to
+`phase72-run-manifest-v2`; the other fourteen canonical run identities and
+their original reservations remain unchanged. V2 resolution accepts the
+retry path only from its validated attempt record and linked recovery event.
+Training continuation, validation, selection reconciliation, final-test
+evaluation, and completed-test replay resolve artifacts through the active
+attempt. The active attempt cannot be changed after authorization, and retry
+is blocked after validation or later-stage artifacts exist.
+
+If a process stops after writing an unlinked event or reserving only part of
+the retry directory, that orphan state does not authorize training; a later
+retry refuses to reuse it and requires manual inspection. If the manifest
+records attempt 2 as `training`, the runner may reconcile it only when the
+existing training result and all artifacts pass the normal verifier; it never
+starts that attempt again. An in-progress attempt without a verifiable
+completed result remains fail-closed. Do not delete or edit orphan evidence
+or manifest files to force recovery.
+
+The recovery procedure did not change the canonical experiment protocol,
+seed roles, validation aggregation, selection rule, or reserved-test policy.
+It does not represent synthetic results as NSE/BSE performance. SHA-256
+digests detect inconsistency against retained evidence but are not signatures
+and do not provide authenticity if an actor can rewrite both the manifest and
+event. Preserve the recovery event, manifest history, and both attempt
+directories together for audit.
+
+The frozen experiment artifacts are read-only inputs to the Phase 8A research
+API.
+
+## Phase 8A — Read-only synthetic research API
+
+Phase 8A exposes six authenticated GET endpoints for summaries from the
+completed Phase 7.2 experiment:
+
+- `GET /api/research/phase7-2/status`
+- `GET /api/research/phase7-2/selection`
+- `GET /api/research/phase7-2/validation`
+- `GET /api/research/phase7-2/final-test`
+- `GET /api/research/phase7-2/final-test/seeds`
+- `GET /api/research/phase7-2/integrity`
+
+Every request uses the shared account `get_current_user` dependency, which
+uses the account database through `get_db`. If account database
+initialization/readiness fails, research requests also return HTTP 503. If
+artifact verification or reading fails, the router returns a separate generic
+research-service HTTP 503 response.
+
+Each request creates a fresh `Phase72ResearchStore`, verifies the frozen
+artifact set, and only then reads the response data. The store expects the
+required Phase 7.2 artifacts beneath the fixed project path
+`.artifacts/phase7_2`; the API accepts no caller-supplied artifact path. The
+artifact set must be provisioned at that path. Missing or invalid artifacts
+are not replaced with generated or partial results.
+
+The research API is read-only: it does not load PPO models, train models, run
+inference, or execute backtests. It only returns stored synthetic experiment
+summaries. These results must never be represented as NSE/BSE or real-market
+performance, investment recommendations, or evidence of expected returns.
+Account, portfolio, market-data, and historical CSV backtest functionality
+remain separate from synthetic PPO research. The dashboard is teammate-owned;
+it was not modified or connected as part of Phase 8A.
